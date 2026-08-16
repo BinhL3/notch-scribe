@@ -25,8 +25,9 @@ unsafe extern "C" {
     fn notch_overlay_set_level(level: f32);
 }
 
-/// Whether the main display has a camera housing. Cached: it requires a main
-/// thread hop, and the built-in display does not sprout a notch at runtime.
+/// Whether the native island can run at all (macOS 12+; it is virtual on
+/// screens without a housing and follows the working screen). Cached: it
+/// requires a main-thread hop and cannot change at runtime.
 pub fn is_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
