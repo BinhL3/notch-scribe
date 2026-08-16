@@ -490,23 +490,24 @@ private final class IslandView: NSView {
 
     /// Without flares the bottom corners carry the whole shape, so a virtual
     /// island rounds them more once it has grown (Alcove's proportions).
-    /// At rest the virtual island floats a hair below the screen edge as a
-    /// full stadium (all four corners round); opening attaches it to the
-    /// edge, square-topped, like the box it becomes.
-    private func topInset(_ s: IslandState) -> CGFloat {
-        synthetic && (s == .closed || s == .peek) ? 2 : 0
-    }
-    private func topRadius(_ s: IslandState) -> CGFloat {
-        synthetic && (s == .closed || s == .peek) ? cornerRadius(s) : 0
+    /// A virtual island never touches the screen edge: every state is a
+    /// floating rounded box (all four corners round), a few points below the
+    /// top, like Alcove's. Only its size and radius change.
+    private func topInset(_ s: IslandState) -> CGFloat { synthetic ? 3 : 0 }
+    private func topRadius(_ s: IslandState) -> CGFloat { synthetic ? cornerRadius(s) : 0 }
+    /// The band above the chin. Real: the housing. Virtual at rest: the
+    /// pill's whole height; open: just top padding, so content sits centred
+    /// in the box instead of below a housing that isn't there.
+    private func housing(_ s: IslandState) -> CGFloat {
+        synthetic && (s == .open || s == .expanded) ? 12 : safeAreaTop
     }
     private func cornerRadius(_ s: IslandState) -> CGFloat {
         guard synthetic else { return Island.cornerRadius(s) }
-        // Resting states are stadiums: radius = half the visible height.
         return switch s {
-        case .closed: (safeAreaTop + Island.chinHeight(.closed) - topInset(.closed)) / 2
-        case .peek: (safeAreaTop + Island.chinHeight(.peek) - topInset(.peek)) / 2
-        case .open: 34
-        case .expanded: 40
+        // Resting states are stadiums: radius = half the visible height.
+        case .closed, .peek: (housing(s) + Island.chinHeight(s) - topInset(s)) / 2
+        case .open: 30
+        case .expanded: 36
         }
     }
 
@@ -515,7 +516,7 @@ private final class IslandView: NSView {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
         let width = baseWidth(s) + (Island.overhang(s) + flare(s)) * 2
-        let height = safeAreaTop + Island.chinHeight(s)
+        let height = housing(s) + Island.chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
             y: bounds.height - height,
