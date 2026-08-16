@@ -420,11 +420,17 @@ private final class IslandView: NSView {
     /// (closed is black-on-black). Virtual: only once it has something to say.
     private func pillVisible(_ s: IslandState) -> Bool { !(synthetic && s == .closed) }
 
+    /// The concave fillets sell the island as part of a housing. With no
+    /// housing they are chrome pretending to be hardware, so a virtual island
+    /// is a plain rounded-bottom shape. Zero keeps the path's segment count,
+    /// so the spring still interpolates between states.
+    private func flare(_ s: IslandState) -> CGFloat { synthetic ? 0 : Island.flare(s) }
+
     /// AppKit's y axis points up, so the pill hangs from the top of the view.
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
-        let width = cutoutWidth + (Island.overhang(s) + Island.flare(s)) * 2
+        let width = cutoutWidth + (Island.overhang(s) + flare(s)) * 2
         let height = safeAreaTop + Island.chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -435,7 +441,7 @@ private final class IslandView: NSView {
     }
 
     private func path(for size: CGSize, _ s: IslandState, closed: Bool = true) -> CGPath {
-        islandPath(size: size, cornerRadius: Island.cornerRadius(s), flare: Island.flare(s), closed: closed)
+        islandPath(size: size, cornerRadius: Island.cornerRadius(s), flare: flare(s), closed: closed)
     }
 
     /// The pill's current footprint plus hover slop, in view coordinates.
@@ -449,7 +455,7 @@ private final class IslandView: NSView {
     /// The chin rect of a state, in view coordinates (y-up).
     private func chinRect(_ s: IslandState) -> CGRect {
         let f = pillFrame(s)
-        let inset = Island.flare(s) + 10
+        let inset = flare(s) + 10
         return CGRect(
             x: f.minX + inset,
             y: f.minY + 8,
@@ -597,7 +603,9 @@ private final class IslandView: NSView {
     private func layoutContents(_ s: IslandState) {
         let open = s == .open
 
-        rim.opacity = s == .closed ? 0 : 1
+        // The key line separates black island from black housing; a virtual
+        // island has no housing to separate from, and reads as an outline.
+        rim.opacity = (s == .closed || synthetic) ? 0 : 1
 
         // Content always keeps the open chin's geometry (top edge at the open
         // chin height, x = 0 the centre line); opacity/scale/blur do the
