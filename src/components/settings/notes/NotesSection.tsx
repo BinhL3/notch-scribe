@@ -117,6 +117,7 @@ export const NotesSection: React.FC = () => {
                 {n.body}
               </span>
               <span className="text-xs text-mid-gray tabular-nums shrink-0">
+                {n.context?.app ? `${n.context.app} · ` : ""}
                 {when(n.created_at)}
               </span>
               <span className="shrink-0 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">

@@ -23,6 +23,8 @@ pub struct Note {
     /// timestamps so they sync as facts, not flags.
     pub done_at: Option<i64>,
     pub archived_at: Option<i64>,
+    /// Where the user was when they said it (see `context::Situation`).
+    pub context: Option<crate::context::Situation>,
 }
 
 /// Leading phrases that turn a dictation into a note. Matched case-insensitively
@@ -90,7 +92,7 @@ impl NoteStore {
             );",
         )?;
         // Additive columns for to-do state; ignore "duplicate column" on rerun.
-        for col in ["done_at INTEGER", "archived_at INTEGER"] {
+        for col in ["done_at INTEGER", "archived_at INTEGER", "context TEXT"] {
             let _ = conn.execute(&format!("ALTER TABLE notes ADD COLUMN {col}"), []);
         }
         Ok(store)
@@ -100,13 +102,21 @@ impl NoteStore {
         Ok(Connection::open(&self.db_path)?)
     }
 
-    pub fn put(&self, body: &str, source: &str) -> Result<Note> {
+    pub fn put(
+        &self,
+        body: &str,
+        source: &str,
+        context: Option<crate::context::Situation>,
+    ) -> Result<Note> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let created_at = chrono::Utc::now().timestamp();
         let conn = self.conn()?;
+        let context_json = context
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
         conn.execute(
-            "INSERT INTO notes (body, created_at, source) VALUES (?1, ?2, ?3)",
-            params![body, created_at, source],
+            "INSERT INTO notes (body, created_at, source, context) VALUES (?1, ?2, ?3, ?4)",
+            params![body, created_at, source, context_json],
         )?;
         Ok(Note {
             id: conn.last_insert_rowid(),
@@ -115,17 +125,19 @@ impl NoteStore {
             source: source.to_string(),
             done_at: None,
             archived_at: None,
+            context,
         })
     }
 
     pub fn list(&self, limit: usize) -> Result<Vec<Note>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, body, created_at, source, done_at, archived_at FROM notes
+            "SELECT id, body, created_at, source, done_at, archived_at, context FROM notes
              WHERE deleted_at IS NULL AND archived_at IS NULL
              ORDER BY (done_at IS NOT NULL), created_at DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
+            let context: Option<String> = r.get(6)?;
             Ok(Note {
                 id: r.get(0)?,
                 body: r.get(1)?,
@@ -133,9 +145,20 @@ impl NoteStore {
                 source: r.get(3)?,
                 done_at: r.get(4)?,
                 archived_at: r.get(5)?,
+                context: context.and_then(|c| serde_json::from_str(&c).ok()),
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Notes checked off since local midnight — the island's "3 noted today".
+    pub fn cleared_since(&self, unix: i64) -> Result<i64> {
+        let conn = self.conn()?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL AND done_at >= ?1",
+            params![unix],
+            |r| r.get(0),
+        )?)
     }
 
     /// Soft delete, so undo (and later sync) can bring it back.
@@ -234,7 +257,7 @@ pub async fn maybe_capture_note(app: &AppHandle, text: &str) -> Option<Note> {
     }
     let raw = note_body(text)?;
     let store = app.try_state::<Arc<NoteStore>>()?;
-    let mut note = match store.put(&raw, "dictation") {
+    let mut note = match store.put(&raw, "dictation", crate::context::current()) {
         Ok(n) => n,
         Err(e) => {
             log::error!("Failed to store note: {e}");
@@ -283,7 +306,9 @@ pub fn acknowledge(app: &AppHandle) {
     crate::utils::hide_recording_overlay(app);
 }
 
-/// Push the current list to the island. Call after any change and at startup.
+/// Push the inbox to the island: open notes only, plus how many were cleared
+/// today. Done and archived notes live in Settings → Notes; the island is
+/// what's still in your face. Call after any change and at startup.
 pub fn push_latest(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
@@ -294,19 +319,33 @@ pub fn push_latest(app: &AppHandle) {
             .list(50)
             .unwrap_or_default()
             .into_iter()
+            .filter(|n| n.done_at.is_none())
             .map(|n| {
                 serde_json::json!({
                     "id": n.id,
                     "body": n.body,
-                    "done": n.done_at.is_some(),
                     "when": relative_time(n.created_at),
+                    "where": n.context.as_ref().and_then(|c| c.label()),
+                    "bundleId": n.context.as_ref().and_then(|c| c.bundle_id.clone()),
                 })
             })
             .collect();
-        crate::native_notch::set_notes(&serde_json::Value::Array(items).to_string());
+        let cleared = store.cleared_since(local_midnight()).unwrap_or(0);
+        let payload = serde_json::json!({ "items": items, "clearedToday": cleared });
+        crate::native_notch::set_notes(&payload.to_string());
     }
     #[cfg(not(target_os = "macos"))]
     let _ = app;
+}
+
+fn local_midnight() -> i64 {
+    use chrono::{Local, NaiveTime, TimeZone};
+    let today = Local::now().date_naive();
+    Local
+        .from_local_datetime(&today.and_time(NaiveTime::MIN))
+        .single()
+        .map(|d| d.timestamp())
+        .unwrap_or(0)
 }
 
 /// The island's list acts through this: Rust owns the store and the UI.
@@ -319,18 +358,23 @@ extern "C" fn on_island_note_action(action: i32, id: i64) {
     let Some(store) = app.try_state::<Arc<NoteStore>>() else {
         return;
     };
+    // 1 = clear (done), 2 = archive, 3 = copy the body to the clipboard.
     let result = match action {
-        1 => {
-            let done = store
+        1 => store.set_done(id, true),
+        2 => store.archive(id),
+        3 => {
+            let body = store
                 .list(50)
                 .unwrap_or_default()
                 .into_iter()
                 .find(|n| n.id == id)
-                .map(|n| n.done_at.is_some())
-                .unwrap_or(false);
-            store.set_done(id, !done)
+                .map(|n| n.body);
+            match body {
+                Some(b) => crate::clipboard::write_text_to_clipboard(app, &b)
+                    .map_err(|e| anyhow::anyhow!("{e}")),
+                None => Ok(()),
+            }
         }
-        2 => store.archive(id),
         _ => Ok(()),
     };
     if let Err(e) = result {

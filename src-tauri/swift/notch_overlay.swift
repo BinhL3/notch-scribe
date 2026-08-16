@@ -1407,7 +1407,7 @@ public func notch_overlay_set_clock(_ enabled: Int32) {
     DispatchQueue.main.async { IslandController.shared.setClock(enabled != 0) }
 }
 
-/// The current notes as JSON: [{"id":1,"body":"…","done":false,"when":"5m ago"}].
+/// The inbox as JSON: {"items":[{"id":1,"body":"…","when":"5m ago","where":"Safari · github.com","bundleId":"com.apple.Safari"}],"clearedToday":3}.
 @_cdecl("notch_overlay_set_notes")
 public func notch_overlay_set_notes(_ json: UnsafePointer<CChar>?) {
     let s = json.map { String(cString: $0) } ?? "[]"
@@ -1415,7 +1415,7 @@ public func notch_overlay_set_notes(_ json: UnsafePointer<CChar>?) {
 }
 
 /// Rust registers a callback for actions taken in the list:
-/// action 1 = toggle done, 2 = archive.
+/// action 1 = clear (done), 2 = archive, 3 = copy body to clipboard.
 public typealias NoteActionCallback = @convention(c) (Int32, Int64) -> Void
 nonisolated(unsafe) var noteActionCallback: NoteActionCallback?
 
@@ -1452,82 +1452,214 @@ public func notch_overlay_set_level(_ level: Float) {
 struct NoteItem: Identifiable, Decodable, Equatable {
     let id: Int64
     var body: String
-    var done: Bool
     var when: String
+    /// "Safari · github.com" — where it was said. Optional.
+    var `where`: String?
+    var bundleId: String?
+}
+
+/// What Rust sends: the inbox (open notes) and today's cleared count.
+struct NotesPayload: Decodable {
+    var items: [NoteItem]
+    var clearedToday: Int
 }
 
 final class NotesModel: ObservableObject {
     @Published var items: [NoteItem] = []
+    @Published var clearedToday: Int = 0
+    /// Rows mid-clear: the check blooms, then the row slides out.
+    @Published var clearing: Set<Int64> = []
+    /// Row that was just copied, for the brief "Copied" flash.
+    @Published var copiedId: Int64?
+    private var iconCache: [String: NSImage] = [:]
+
     func load(json: String) {
-        if let data = json.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode([NoteItem].self, from: data) {
-            items = decoded
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(NotesPayload.self, from: data) else { return }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            // Keep rows that are animating out until the animation removes them.
+            items = decoded.items + items.filter { clearing.contains($0.id) && !decoded.items.contains($0) }
+            clearedToday = decoded.clearedToday
         }
     }
-    func toggle(_ n: NoteItem) {
-        if let i = items.firstIndex(of: n) { items[i].done.toggle() }
-        noteActionCallback?(1, n.id)
+
+    /// Done means gone: the island is an inbox. Rust records `done_at`; the
+    /// full list stays in Settings.
+    func clear(_ n: NoteItem) {
+        guard !clearing.contains(n.id) else { return }
+        clearing.insert(n.id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
+            guard let self else { return }
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                self.items.removeAll { $0.id == n.id }
+                self.clearedToday += 1
+            }
+            self.clearing.remove(n.id)
+            noteActionCallback?(1, n.id)
+        }
     }
-    func archive(_ n: NoteItem) {
-        items.removeAll { $0.id == n.id }
-        noteActionCallback?(2, n.id)
+
+    func copy(_ n: NoteItem) {
+        noteActionCallback?(3, n.id)
+        withAnimation(.easeOut(duration: 0.15)) { copiedId = n.id }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+            guard let self, self.copiedId == n.id else { return }
+            withAnimation(.easeIn(duration: 0.25)) { self.copiedId = nil }
+        }
+    }
+
+    func icon(for bundleId: String?) -> NSImage? {
+        guard let bundleId else { return nil }
+        if let cached = iconCache[bundleId] { return cached }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return nil }
+        let img = NSWorkspace.shared.icon(forFile: url.path)
+        iconCache[bundleId] = img
+        return img
     }
 }
 
-/// Dark, sparse list to sit inside the black island. Swipe left to archive,
-/// swipe right (or click the circle) to check off.
+/// The inbox that sits inside the black island. Open notes only; clearing a
+/// row (circle or swipe) checks it and slides it away; tapping a row copies
+/// it — that's the thing you actually do with a note.
 @available(macOS 14.0, *)
 struct NotesListView: View {
     @ObservedObject var model: NotesModel
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            header
             if model.items.isEmpty {
-                VStack(spacing: 6) {
-                    Text("No notes yet").font(.system(size: 13, weight: .semibold))
-                    Text("Hold your dictation key and say “note down…”")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                empty
             } else {
-                List {
-                    ForEach(model.items) { n in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Button { model.toggle(n) } label: {
-                                Image(systemName: n.done ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(n.done ? Color.green : Color.white.opacity(0.5))
-                                    .font(.system(size: 15))
-                            }
-                            .buttonStyle(.plain)
-                            Text(n.body)
-                                .font(.system(size: 13))
-                                .strikethrough(n.done, color: .white.opacity(0.5))
-                                .foregroundStyle(n.done ? Color.white.opacity(0.45) : Color.white)
-                                .lineLimit(2)
-                            Spacer(minLength: 6)
-                            Text(n.when).font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 3)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparatorTint(Color.white.opacity(0.08))
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) { model.archive(n) } label: {
-                                Label("Archive", systemImage: "archivebox")
-                            }.tint(.gray)
-                        }
-                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                            Button { model.toggle(n) } label: {
-                                Label(n.done ? "Undo" : "Done", systemImage: n.done ? "arrow.uturn.backward" : "checkmark")
-                            }.tint(.green)
-                        }
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                list
             }
         }
         .foregroundStyle(.white)
         .background(Color.clear)
         .preferredColorScheme(.dark)
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Notes")
+                .font(.system(size: 13, weight: .semibold))
+            if !model.items.isEmpty {
+                Text("\(model.items.count)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .contentTransition(.numericText())
+            }
+            Spacer()
+            if model.clearedToday > 0 {
+                Text("\(model.clearedToday) cleared today")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .contentTransition(.numericText())
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+
+    private var empty: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.white.opacity(0.35))
+            Text("All clear")
+                .font(.system(size: 13, weight: .semibold))
+            Text(model.clearedToday > 0
+                 ? "Say “note down…” while dictating to add one"
+                 : "Hold your dictation key and say “note down…”")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, 10)
+        .transition(.opacity)
+    }
+
+    private var list: some View {
+        List {
+            ForEach(model.items) { n in
+                row(n)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 12))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparatorTint(Color.white.opacity(0.08))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button { model.clear(n) } label: {
+                            Label("Clear", systemImage: "checkmark")
+                        }.tint(.green)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button { model.copy(n) } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }.tint(.blue)
+                    }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .transition(.opacity)
+    }
+
+    private func row(_ n: NoteItem) -> some View {
+        let clearing = model.clearing.contains(n.id)
+        let copied = model.copiedId == n.id
+        return HStack(alignment: .top, spacing: 10) {
+            Button { model.clear(n) } label: {
+                ZStack {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(clearing ? 0 : 0.35), lineWidth: 1.2)
+                    Circle()
+                        .fill(Color.green)
+                        .scaleEffect(clearing ? 1 : 0.2)
+                        .opacity(clearing ? 1 : 0)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.black.opacity(0.85))
+                        .scaleEffect(clearing ? 1 : 0.4)
+                        .opacity(clearing ? 1 : 0)
+                }
+                .frame(width: 17, height: 17)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: clearing)
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(n.body)
+                    .font(.system(size: 13))
+                    .lineLimit(2)
+                    .foregroundStyle(.white.opacity(clearing ? 0.4 : 1))
+                    .strikethrough(clearing, color: .white.opacity(0.5))
+                HStack(spacing: 5) {
+                    if let icon = model.icon(for: n.bundleId) {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 12, height: 12)
+                    }
+                    Text([n.where, n.when].compactMap { $0 }.joined(separator: "  ·  "))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 6)
+            if copied {
+                Text("Copied")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(Color.white.opacity(0.12)))
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.copy(n) }
+        .opacity(clearing ? 0.6 : 1)
     }
 }

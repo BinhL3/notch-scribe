@@ -1111,7 +1111,11 @@ source: string;
  * Notes are to-dos: checked off, or archived out of the list. Both are
  * timestamps so they sync as facts, not flags.
  */
-done_at: number | null; archived_at: number | null }
+done_at: number | null; archived_at: number | null; 
+/**
+ * Where the user was when they said it (see `context::Situation`).
+ */
+context: Situation | null }
 export type OrtAcceleratorSetting = "auto" | "cpu" | "cuda" | "directml" | "rocm"
 export type OverlayPosition = "top" | "bottom"
 /**
@@ -1159,6 +1163,19 @@ uncovered_bindings: string[];
  * warning banner appears and explains why recording refused.
  */
 recorder_blocked: boolean }
+export type Situation = { 
+/**
+ * Localised app name, e.g. "Safari".
+ */
+app: string | null; bundle_id: string | null; 
+/**
+ * Page title, browsers only (for now).
+ */
+title: string | null; 
+/**
+ * Page URL, browsers only.
+ */
+url: string | null }
 export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type SoundTheme = "marimba" | "pop" | "custom"
 /**

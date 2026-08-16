@@ -10,6 +10,7 @@ mod catalog;
 pub mod cli;
 mod clipboard;
 mod commands;
+mod context;
 #[cfg(target_os = "macos")]
 mod glass;
 mod helpers;

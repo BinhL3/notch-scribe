@@ -647,6 +647,9 @@ impl ShortcutAction for TranscribeAction {
             *slot = None;
         }
 
+        // Where the user is right now: notes carry this as their situation.
+        crate::context::snapshot();
+
         // Capture the selection before anything else: the moment we show an
         // overlay or the user moves on, the frontmost app may lose it.
         #[cfg(target_os = "macos")]
