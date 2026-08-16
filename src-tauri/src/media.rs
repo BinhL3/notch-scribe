@@ -100,9 +100,21 @@ pub fn start(app: &AppHandle) {
             .name("now-playing".into())
             .spawn(move || {
                 let Some(p) = paths(&app) else { return };
-                if !adapter_works(p) {
-                    info!("[media] Now Playing unavailable on this system");
-                    return;
+                // The self-test is racy (exit 4 = "get returned nothing"
+                // right after the fake client): retry with backoff, and keep
+                // trying at a slow cadence rather than giving up for good.
+                let mut attempt = 0u32;
+                while !adapter_works(p) {
+                    attempt += 1;
+                    let wait = match attempt {
+                        1..=3 => Duration::from_secs(2),
+                        4..=6 => Duration::from_secs(15),
+                        _ => Duration::from_secs(600),
+                    };
+                    if attempt == 7 {
+                        info!("[media] Now Playing unavailable on this system (will keep checking)");
+                    }
+                    std::thread::sleep(wait);
                 }
                 crate::native_notch::set_media_callback(on_island_media_action);
                 let _ = APP.set(app.clone());
