@@ -348,13 +348,18 @@ pub struct AudioRecordingManager {
     /// stopped or cancelled. This prevents a slow device from producing a late
     /// "ready" indication for a session the user already ended.
     capture_generation: Arc<AtomicU64>,
-    /// Resolution of a *named* microphone (selected or clamshell) to its cpal
-    /// device, cached so on-demand recording starts skip the full device
-    /// enumeration (~40-110ms). Keyed by the resolved name, so a settings
-    /// change misses naturally; cleared when an open fails (device unplugged)
-    /// so the retry re-enumerates. The system-default case is never cached —
-    /// the recorder resolves the current default itself, cheaply.
-    cached_device: Arc<Mutex<Option<(String, cpal::Device)>>>,
+    /// The last resolution of the microphone preference (priority list +
+    /// clamshell) against the connected devices, cached so on-demand starts
+    /// skip the full enumeration (~40-110ms). `None` = not resolved; `Some(
+    /// None)` = resolved to the system default, which the recorder picks
+    /// itself at open. Invalidated when settings change, when an open fails
+    /// (stale device) and — the case that matters for docking — whenever
+    /// CoreAudio reports the device list changed (`watch_devices`).
+    cached_device: Arc<Mutex<Option<Option<cpal::Device>>>>,
+    /// Set by the device watcher while a stream is open: the next start must
+    /// reopen so it lands on the now-best microphone rather than reusing a
+    /// stream on yesterday's.
+    devices_stale: Arc<AtomicBool>,
 }
 
 impl AudioRecordingManager {
@@ -386,6 +391,7 @@ impl AudioRecordingManager {
             recording_active: Arc::new(AtomicBool::new(false)),
             capture_generation: Arc::new(AtomicU64::new(0)),
             cached_device: Arc::new(Mutex::new(None)),
+            devices_stale: Arc::new(AtomicBool::new(false)),
         };
 
         // Always-on?  Open immediately.
@@ -398,11 +404,12 @@ impl AudioRecordingManager {
 
     /* ---------- helper methods --------------------------------------------- */
 
-    /// The microphone name the settings ask for, or `None` for the system
-    /// default. Only runs the clamshell probe (an `ioreg` subprocess, ~10-20ms)
-    /// when a clamshell microphone is actually configured.
-    fn desired_device_name(&self, settings: &AppSettings) -> Option<String> {
-        if settings.clamshell_microphone.is_some() {
+    /// The microphones the settings ask for, best first; empty = system
+    /// default. Only runs the clamshell probe (an `ioreg` subprocess,
+    /// ~10-20ms) when a clamshell microphone is actually configured.
+    fn desired_device_names(&self, settings: &AppSettings) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(clam) = settings.clamshell_microphone.clone() {
             let clamshell_started = Instant::now();
             let is_clamshell = clamshell::is_clamshell().unwrap_or(false);
             debug!(
@@ -411,55 +418,80 @@ impl AudioRecordingManager {
                 is_clamshell
             );
             if is_clamshell {
-                return settings.clamshell_microphone.clone();
+                names.push(clam);
             }
         }
-        settings.selected_microphone.clone()
+        if settings.microphone_priority.is_empty() {
+            names.extend(settings.selected_microphone.clone());
+        } else {
+            names.extend(settings.microphone_priority.iter().cloned());
+        }
+        names
     }
 
     pub fn invalidate_device_cache(&self) {
         *self.cached_device.lock().unwrap() = None;
     }
 
+    /// The first preferred microphone that is connected, or `None` for the
+    /// system default. One enumeration, then cached until something changes.
     fn get_effective_microphone_device(&self, settings: &AppSettings) -> Option<cpal::Device> {
-        let device_name = match self.desired_device_name(settings) {
-            Some(name) => name,
-            None => {
-                debug!("device resolve: no mic configured -> system default");
-                return None;
-            }
-        };
-
-        // Cache hit: skip the full enumeration. A stale device (unplugged)
-        // fails at open, where the caller invalidates and retries fresh.
-        if let Some((cached_name, device)) = self.cached_device.lock().unwrap().as_ref() {
-            if *cached_name == device_name {
-                debug!("device resolve: cache hit for '{}'", device_name);
-                return Some(device.clone());
-            }
+        let wanted = self.desired_device_names(settings);
+        if wanted.is_empty() {
+            debug!("device resolve: no mic configured -> system default");
+            return None;
+        }
+        if let Some(resolved) = self.cached_device.lock().unwrap().as_ref() {
+            debug!("device resolve: cache hit");
+            return resolved.clone();
         }
 
-        // Find the device by name
         let enumerate_started = Instant::now();
         let device = match list_input_devices() {
-            Ok(devices) => devices
-                .into_iter()
-                .find(|d| d.name == device_name)
-                .map(|d| d.device),
+            Ok(devices) => wanted.iter().find_map(|name| {
+                devices
+                    .iter()
+                    .find(|d| d.name == *name)
+                    .map(|d| (name, d.device.clone()))
+            }),
             Err(e) => {
                 debug!("Failed to list devices, using default: {}", e);
                 None
             }
         };
         debug!(
-            "device resolve: enumerate={:?} (found={})",
+            "device resolve: enumerate={:?} wanted={:?} -> {:?}",
             enumerate_started.elapsed(),
-            device.is_some()
+            wanted,
+            device.as_ref().map(|(n, _)| n.as_str()).unwrap_or("system default")
         );
-        if let Some(d) = &device {
-            *self.cached_device.lock().unwrap() = Some((device_name, d.clone()));
-        }
+        let device = device.map(|(_, d)| d);
+        *self.cached_device.lock().unwrap() = Some(device.clone());
         device
+    }
+
+    /// CoreAudio says the input devices (or the default input) changed. Forget
+    /// what we resolved; if a stream is open and idle, close it so the next
+    /// start re-resolves — always-on reopens right away. Mid-recording we only
+    /// mark it stale; the switch happens at the next start.
+    pub fn on_devices_changed(&self) {
+        self.invalidate_device_cache();
+        let state = self.state.lock().unwrap();
+        if !matches!(*state, RecordingState::Idle) {
+            self.devices_stale.store(true, Ordering::SeqCst);
+            return;
+        }
+        if *self.is_open.lock().unwrap() {
+            info!("Input devices changed; re-resolving microphone");
+            self.close_generation.fetch_add(1, Ordering::SeqCst);
+            self.stop_microphone_stream();
+            if matches!(*self.mode.lock().unwrap(), MicrophoneMode::AlwaysOn) {
+                if let Err(e) = self.start_microphone_stream() {
+                    warn!("Reopening always-on stream after device change failed: {e}");
+                }
+            }
+        }
+        self.devices_stale.store(false, Ordering::SeqCst);
     }
 
     fn schedule_lazy_close(&self) {
@@ -566,7 +598,8 @@ impl AudioRecordingManager {
                 .as_ref()
                 .is_some_and(|rec| rec.is_capture_worker_dead());
 
-            if !worker_dead {
+            let stale = self.devices_stale.swap(false, Ordering::SeqCst);
+            if !worker_dead && !stale {
                 // trace, not debug: with the aliveness check in
                 // try_start_recording this now fires on every keypress in
                 // always-on mode.
@@ -574,7 +607,11 @@ impl AudioRecordingManager {
                 return Ok(());
             }
 
-            warn!("Microphone stream is no longer running (device disconnected?); reopening");
+            if stale {
+                info!("Input devices changed since this stream opened; reopening on the preferred microphone");
+            } else {
+                warn!("Microphone stream is no longer running (device disconnected?); reopening");
+            }
 
             // Torn down inline rather than via stop_microphone_stream(), which
             // takes the `is_open` lock we are already holding.
@@ -957,3 +994,67 @@ impl AudioRecordingManager {
         }
     }
 }
+
+
+/// Ask CoreAudio to tell us when input devices come and go (cpal cannot).
+/// Docking a monitor with a USB microphone is exactly this: the preferred
+/// mic appears, and the next dictation should already be on it. Callbacks
+/// arrive on a CoreAudio thread and fire in bursts, so the work is debounced
+/// onto our own thread. Registered once, for the life of the process.
+#[cfg(target_os = "macos")]
+pub fn watch_devices(app: tauri::AppHandle) {
+    use objc2_core_audio::{
+        kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+        AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress,
+    };
+    use std::ptr::NonNull;
+
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C-unwind" fn on_change(
+        _id: AudioObjectID,
+        _count: u32,
+        _addresses: NonNull<AudioObjectPropertyAddress>,
+        client: *mut std::ffi::c_void,
+    ) -> i32 {
+        let app = unsafe { &*(client as *const tauri::AppHandle) }.clone();
+        let gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            if GENERATION.load(Ordering::SeqCst) != gen {
+                return; // a later change superseded this one
+            }
+            if let Some(rm) = app.try_state::<Arc<AudioRecordingManager>>() {
+                rm.on_devices_changed();
+            }
+            use tauri::Emitter;
+            let _ = app.emit("audio-devices-changed", ());
+        });
+        0
+    }
+
+    // Leaked on purpose: the listener lives as long as the process.
+    let client = Box::into_raw(Box::new(app)) as *mut std::ffi::c_void;
+    for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice] {
+        let mut addr = AudioObjectPropertyAddress {
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let status = unsafe {
+            AudioObjectAddPropertyListener(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&mut addr),
+                Some(on_change),
+                client,
+            )
+        };
+        if status != 0 {
+            warn!("Could not watch audio devices (selector {selector:#x}): OSStatus {status}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn watch_devices(_app: tauri::AppHandle) {}

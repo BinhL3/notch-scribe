@@ -375,8 +375,15 @@ pub struct AppSettings {
     pub onboarding_completed: bool,
     #[serde(default = "default_always_on_microphone")]
     pub always_on_microphone: bool,
+    /// The microphone to use, or None for the system default. Kept as the
+    /// head of `microphone_priority` for older stores/UI; the list is truth.
     #[serde(default)]
     pub selected_microphone: Option<String>,
+    /// Microphones in order of preference: the first one that is connected
+    /// is used, so docking (USB mic) and undocking (built-in) both just work.
+    /// Empty = system default. Migrated from `selected_microphone` on read.
+    #[serde(default)]
+    pub microphone_priority: Vec<String>,
     /// Which input channel to use on the selected microphone device.
     /// None means "average all channels" (original behavior).
     #[serde(default)]
@@ -944,6 +951,7 @@ pub fn get_default_settings() -> AppSettings {
         onboarding_completed: false,
         always_on_microphone: false,
         selected_microphone: None,
+        microphone_priority: Vec::new(),
         selected_channel: None,
         clamshell_microphone: None,
         selected_output_device: None,
@@ -1140,6 +1148,15 @@ fn apply_settings_migrations(
     if settings_value.get("whats_new_last_seen_version").is_none() {
         settings.whats_new_last_seen_version = String::new();
         updated = true;
+    }
+
+    // The single selected microphone became the head of a priority list.
+    // Filled in memory only — it is persisted with the next real write, so
+    // an old store is not rewritten on every read.
+    if settings.microphone_priority.is_empty() {
+        if let Some(name) = settings.selected_microphone.clone() {
+            settings.microphone_priority = vec![name];
+        }
     }
 
     let stored_schema_version = settings_value

@@ -426,6 +426,13 @@ private final class IslandView: NSView {
     /// so the spring still interpolates between states.
     private func flare(_ s: IslandState) -> CGFloat { synthetic ? 0 : Island.flare(s) }
 
+    /// Without flares the bottom corners carry the whole shape, so a virtual
+    /// island rounds them more once it has grown (Alcove's proportions).
+    private func cornerRadius(_ s: IslandState) -> CGFloat {
+        guard synthetic else { return Island.cornerRadius(s) }
+        return switch s { case .closed: 14; case .peek: 18; case .open: 34; case .expanded: 40 }
+    }
+
     /// AppKit's y axis points up, so the pill hangs from the top of the view.
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
@@ -441,7 +448,7 @@ private final class IslandView: NSView {
     }
 
     private func path(for size: CGSize, _ s: IslandState, closed: Bool = true) -> CGPath {
-        islandPath(size: size, cornerRadius: Island.cornerRadius(s), flare: flare(s), closed: closed)
+        islandPath(size: size, cornerRadius: cornerRadius(s), flare: flare(s), closed: closed)
     }
 
     /// The pill's current footprint plus hover slop, in view coordinates.

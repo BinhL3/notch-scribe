@@ -712,6 +712,7 @@ pub fn run(cli_args: CliArgs) {
             commands::audio::open_microphone_privacy_settings,
             commands::audio::get_available_microphones,
             commands::audio::set_selected_microphone,
+            commands::audio::set_microphone_priority,
             commands::audio::get_selected_microphone,
             commands::audio::get_available_output_devices,
             commands::audio::set_selected_output_device,
@@ -981,6 +982,9 @@ pub fn run(cli_args: CliArgs) {
             // Seed the account's full name into custom words once.
             #[cfg(target_os = "macos")]
             seed_owner_name(app.handle());
+
+            // Follow microphones as they come and go (docking).
+            managers::audio::watch_devices(app.handle().clone());
 
             // The native island sits at rest over the housing and answers
             // hover, so it should be resident from launch, not from the

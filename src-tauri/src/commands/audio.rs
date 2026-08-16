@@ -212,15 +212,35 @@ pub async fn get_available_microphones() -> Result<Vec<AudioDevice>, String> {
     .map_err(|e| format!("audio task join failed: {}", e))?
 }
 
+/// Selecting a microphone puts it at the head of the priority list (the rest
+/// keep their order); "default" empties the list.
 #[tauri::command]
 #[specta::specta]
 pub async fn set_selected_microphone(app: AppHandle, device_name: String) -> Result<(), String> {
-    let mut settings = get_settings(&app);
-    settings.selected_microphone = if device_name == "default" {
-        None
+    let settings = get_settings(&app);
+    let mut priority = settings.microphone_priority.clone();
+    if device_name == "default" {
+        priority.clear();
     } else {
-        Some(device_name)
-    };
+        priority.retain(|n| *n != device_name);
+        priority.insert(0, device_name);
+    }
+    set_microphone_priority(app, priority).await
+}
+
+/// The full ranking: the first connected microphone is used; empty = system
+/// default. Restarts an idle stream so the change applies at once.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_microphone_priority(app: AppHandle, names: Vec<String>) -> Result<(), String> {
+    let mut settings = get_settings(&app);
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = names
+        .into_iter()
+        .filter(|n| !n.is_empty() && n != "default" && n != "Default" && seen.insert(n.clone()))
+        .collect();
+    settings.selected_microphone = names.first().cloned();
+    settings.microphone_priority = names;
     write_settings(&app, settings);
 
     // Update the audio manager to use the new device. update_selected_device

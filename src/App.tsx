@@ -83,6 +83,17 @@ function App() {
     }
   }, [onboardingStep, refreshAudioDevices, refreshOutputDevices]);
 
+  // Microphones come and go (docking): keep the list current.
+  useEffect(() => {
+    const unlisten = listen("audio-devices-changed", () => {
+      refreshAudioDevices();
+      refreshOutputDevices();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [refreshAudioDevices, refreshOutputDevices]);
+
   // Handle keyboard shortcuts for debug mode toggle
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

@@ -748,9 +748,25 @@ async getAvailableMicrophones() : Promise<Result<AudioDevice[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Selecting a microphone puts it at the head of the priority list (the rest
+ * keep their order); "default" empties the list.
+ */
 async setSelectedMicrophone(deviceName: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_selected_microphone", { deviceName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The full ranking: the first connected microphone is used; empty = system
+ * default. Restarts an idle stream so the change applies at once.
+ */
+async setMicrophonePriority(names: string[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_microphone_priority", { names }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1004,7 +1020,18 @@ bindings?: Partial<{ [key in string]: ShortcutBinding }>; push_to_talk?: boolean
  * upgrading from before this key existed are blanked by the migration so they
  * see the current release's notes — see `apply_settings_migrations`.
  */
-whats_new_last_seen_version?: string; selected_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; selected_microphone?: string | null; 
+whats_new_last_seen_version?: string; selected_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; 
+/**
+ * The microphone to use, or None for the system default. Kept as the
+ * head of `microphone_priority` for older stores/UI; the list is truth.
+ */
+selected_microphone?: string | null; 
+/**
+ * Microphones in order of preference: the first one that is connected
+ * is used, so docking (USB mic) and undocking (built-in) both just work.
+ * Empty = system default. Migrated from `selected_microphone` on read.
+ */
+microphone_priority?: string[]; 
 /**
  * Which input channel to use on the selected microphone device.
  * None means "average all channels" (original behavior).
