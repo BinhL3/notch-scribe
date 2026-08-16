@@ -158,7 +158,8 @@ fn stream_once(p: &Paths) -> Result<(), String> {
                 s.len().hash(&mut h);
                 s.get(..64).unwrap_or(s).hash(&mut h);
                 s.get(s.len().saturating_sub(64)..).unwrap_or("").hash(&mut h);
-                h.finish()
+                // Keep it inside i64 so every JSON reader agrees on it.
+                h.finish() >> 1
             })
             .unwrap_or(0);
         let mut out = state.clone();

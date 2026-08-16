@@ -2044,7 +2044,7 @@ final class NowPlayingModel: ObservableObject {
         durationMicros = Self.int64(obj["durationMicros"])
         elapsedMicros = Self.int64(obj["elapsedTimeMicros"])
         timestampMicros = Self.int64(obj["timestampEpochMicros"])
-        let key = UInt64(Self.int64(obj["artworkKey"]))
+        let key = Self.uint64(obj["artworkKey"])
         if key != artworkKey || (key != 0 && artwork == nil) {
             if let b64 = obj["artworkData"] as? String, let d = Data(base64Encoded: b64), let img = NSImage(data: d) {
                 artwork = img
@@ -2071,6 +2071,12 @@ final class NowPlayingModel: ObservableObject {
 
     private static func int64(_ v: Any?) -> Int64 {
         if let n = v as? NSNumber { return n.int64Value }
+        return 0
+    }
+    /// Never `UInt64(int64Value)`: a value above Int64.max comes through as
+    /// negative and that conversion traps (it crashed the app once).
+    private static func uint64(_ v: Any?) -> UInt64 {
+        if let n = v as? NSNumber { return n.uint64Value }
         return 0
     }
 
