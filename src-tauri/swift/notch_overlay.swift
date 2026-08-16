@@ -285,6 +285,8 @@ private final class IslandView: NSView {
 
     private var cutoutWidth: CGFloat = 186
     private var safeAreaTop: CGFloat = 32
+    /// No hardware housing on this screen: draw nothing at rest.
+    private var synthetic = false
     private(set) var state: IslandState = .closed
 
     override init(frame: NSRect) {
@@ -407,11 +409,16 @@ private final class IslandView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat) {
+    func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat, synthetic: Bool) {
         self.cutoutWidth = cutoutWidth
         self.safeAreaTop = safeAreaTop
+        self.synthetic = synthetic
         layoutPill(.closed, animated: false)
     }
+
+    /// Whether the pill is drawn at all in a state. Real housing: always
+    /// (closed is black-on-black). Virtual: only once it has something to say.
+    private func pillVisible(_ s: IslandState) -> Bool { !(synthetic && s == .closed) }
 
     /// AppKit's y axis points up, so the pill hangs from the top of the view.
     private func pillFrame(_ s: IslandState) -> CGRect {
@@ -505,6 +512,8 @@ private final class IslandView: NSView {
             rim.path = path(for: target.size, s, closed: false)
             shadowLayer.shadowPath = targetPath
             shadowLayer.shadowOpacity = shadowOpacity
+            pill.opacity = pillVisible(s) ? 1 : 0
+            shadowLayer.opacity = pill.opacity
             layoutContents(s)
             CATransaction.commit()
             return
@@ -564,6 +573,20 @@ private final class IslandView: NSView {
         shadowLayer.shadowOpacity = shadowOpacity
         shadowLayer.add(boundsSpring, forKey: "bounds")
         shadowLayer.add(shadowSpring, forKey: "shadowPath")
+        // Virtual island: fade in ahead of the growth so it never pops, and
+        // fade out with the shrink so it dissolves into the edge.
+        let visible: Float = pillVisible(s) ? 1 : 0
+        if pill.opacity != visible {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = pill.presentation()?.opacity ?? pill.opacity
+            fade.toValue = visible
+            fade.duration = visible == 1 ? 0.18 : duration * 0.6
+            fade.timingFunction = CAMediaTimingFunction(name: visible == 1 ? .easeOut : .easeIn)
+            for l in [pill, shadowLayer] as [CALayer] {
+                l.opacity = visible
+                l.add(fade, forKey: "opacity")
+            }
+        }
         layoutContents(s)
         CATransaction.commit()
     }
@@ -1105,14 +1128,72 @@ private struct SiriWave {
 
 // MARK: - Panel
 
-/// Housing height and cutout width, or nil when this screen has no notch
-/// (or the OS predates the safe-area APIs).
-private func notchMetrics(of screen: NSScreen) -> (safeAreaTop: CGFloat, cutoutWidth: CGFloat)? {
-    guard #available(macOS 12.0, *) else { return nil }
-    let safeAreaTop = screen.safeAreaInsets.top
-    guard safeAreaTop > 0 else { return nil }
-    let auxWidth = screen.auxiliaryTopLeftArea?.width ?? 0
-    return (safeAreaTop, max(screen.frame.width - auxWidth * 2, 0))
+/// Housing height and cutout width for a screen. Real on a notched display;
+/// on any other screen the island is *virtual*: it hangs from the top edge
+/// over the centre of the menu bar (which is empty there), sized like a
+/// MacBook Pro housing, and is invisible at rest — there is no hardware to
+/// fuse with, so at rest there is nothing to draw.
+private struct ScreenMetrics {
+    let safeAreaTop: CGFloat
+    let cutoutWidth: CGFloat
+    let synthetic: Bool
+}
+
+private func screenMetrics(of screen: NSScreen) -> ScreenMetrics {
+    if #available(macOS 12.0, *), screen.safeAreaInsets.top > 0 {
+        let auxWidth = screen.auxiliaryTopLeftArea?.width ?? 0
+        return ScreenMetrics(
+            safeAreaTop: screen.safeAreaInsets.top,
+            cutoutWidth: max(screen.frame.width - auxWidth * 2, 0),
+            synthetic: false
+        )
+    }
+    // Menu bar height, or a housing-like 24 when the bar is hidden.
+    let menuBar = screen.frame.maxY - screen.visibleFrame.maxY
+    return ScreenMetrics(
+        safeAreaTop: menuBar > 0 ? menuBar : 24,
+        cutoutWidth: 180,
+        synthetic: true
+    )
+}
+
+/// The screen the user is working on: where the frontmost app's focused
+/// window is (that is where dictation lands), else under the pointer, else
+/// the notched one, else the first. `NSScreen.main` is wrong here — it is
+/// *our* key window's screen, and we have none.
+private func workingScreen() -> NSScreen? {
+    if let s = focusedWindowScreen() { return s }
+    let mouse = NSEvent.mouseLocation
+    if let s = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) { return s }
+    if let s = NSScreen.screens.first(where: { !screenMetrics(of: $0).synthetic }) { return s }
+    return NSScreen.screens.first
+}
+
+/// Screen containing the frontmost app's focused window, via Accessibility
+/// (which dictation already needs). AX coordinates are top-left origin on the
+/// primary screen; AppKit's are bottom-left.
+private func focusedWindowScreen() -> NSScreen? {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    var winRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(ax, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
+          let winRef else { return nil }
+    let win = winRef as! AXUIElement
+    var posRef: CFTypeRef?
+    var sizeRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef) == .success,
+          AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
+          let posRef, let sizeRef else { return nil }
+    var pos = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
+          AXValueGetValue(sizeRef as! AXValue, .cgSize, &size),
+          let primary = NSScreen.screens.first else { return nil }
+    let centre = CGPoint(
+        x: pos.x + size.width / 2,
+        y: primary.frame.maxY - (pos.y + size.height / 2)
+    )
+    return NSScreen.screens.first { $0.frame.contains(centre) }
 }
 
 private final class IslandController {
@@ -1132,37 +1213,22 @@ private final class IslandController {
     private var pendingCollapse: DispatchWorkItem?
     private var mouseMonitors: [Any] = []
 
+    /// The screen the panel currently sits on.
+    private var screen: NSScreen?
+    private var screenObserver: Any?
+
     private func ensurePanel() -> (NSPanel, IslandView)? {
         if let panel, let view { return (panel, view) }
-        // The notched screen, NOT NSScreen.main: main is the screen with
-        // keyboard focus, so with an external monitor attached the island
-        // would center itself on the wrong display.
-        guard let screen = NSScreen.screens.first(where: { notchMetrics(of: $0) != nil }),
-              let metrics = notchMetrics(of: screen)
-        else { return nil }
-
-        let safeAreaTop = metrics.safeAreaTop
-        let cutoutWidth = metrics.cutoutWidth
-
-        // Wide and tall enough for the fully open island; the panel itself never
-        // resizes, so nothing but the layer moves during an animation.
-        let size = NSSize(
-            width: cutoutWidth + (Island.overhang(.expanded) + Island.flare(.expanded)) * 2 + 40,
-            height: safeAreaTop + Island.chinHeight(.expanded) + 20
-        )
-        let origin = NSPoint(
-            x: screen.frame.midX - size.width / 2,
-            y: screen.frame.maxY - size.height
-        )
-
+        guard let target = workingScreen() else { return nil }
         let panel = NSPanel(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 100, height: 100)),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        // Above the menu bar: on a non-notch screen the island hangs over it.
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
@@ -1170,18 +1236,58 @@ private final class IslandController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.hidesOnDeactivate = false
 
-        let view = IslandView(frame: NSRect(origin: .zero, size: size))
-        view.configure(cutoutWidth: cutoutWidth, safeAreaTop: safeAreaTop)
+        let view = IslandView(frame: panel.contentView?.bounds ?? .zero)
+        view.autoresizingMask = [.width, .height]
         panel.contentView = view
 
         self.panel = panel
         self.view = view
+        place(on: target, panel: panel, view: view)
         // Resident from now on: the closed pill is black over the black
-        // housing, so an on-screen panel costs nothing visually, and hover
-        // has to work while nothing is being recorded.
+        // housing (or invisible on other screens), so an on-screen panel costs
+        // nothing visually, and hover has to work while nothing is recording.
         panel.orderFrontRegardless()
         installHoverMonitor(panel: panel, view: view)
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.screensChanged() }
         return (panel, view)
+    }
+
+    /// Size and position the panel for a screen. Wide and tall enough for the
+    /// fully open island; the panel itself never resizes during an animation.
+    private func place(on target: NSScreen, panel: NSPanel, view: IslandView) {
+        let m = screenMetrics(of: target)
+        let size = NSSize(
+            width: m.cutoutWidth + (Island.overhang(.expanded) + Island.flare(.expanded)) * 2 + 40,
+            height: m.safeAreaTop + Island.chinHeight(.expanded) + 20
+        )
+        let origin = NSPoint(
+            x: target.frame.midX - size.width / 2,
+            y: target.frame.maxY - size.height
+        )
+        panel.setFrame(NSRect(origin: origin, size: size), display: false)
+        view.frame = NSRect(origin: .zero, size: size)
+        view.configure(cutoutWidth: m.cutoutWidth, safeAreaTop: m.safeAreaTop, synthetic: m.synthetic)
+        screen = target
+    }
+
+    /// Move to `target` if idle. Never mid-gesture: an island that jumps
+    /// screens while open is worse than one on the wrong screen.
+    private func follow(_ target: NSScreen?) {
+        guard let target, let panel, let view, target != screen,
+              !recording, !expanded, view.state == .closed else { return }
+        place(on: target, panel: panel, view: view)
+    }
+
+    private func screensChanged() {
+        guard let panel, let view else { return }
+        // Our screen may be gone or resized; re-place on the best one.
+        let stillThere = screen.map { NSScreen.screens.contains($0) } ?? false
+        if !stillThere || (!recording && !expanded && view.state == .closed) {
+            if let t = stillThere ? screen : workingScreen() { place(on: t, panel: panel, view: view) }
+        }
     }
 
     // MARK: Hover
@@ -1193,7 +1299,12 @@ private final class IslandController {
     private func installHoverMonitor(panel: NSPanel, view: IslandView) {
         let handler: (NSEvent) -> Void = { [weak self, weak panel, weak view] _ in
             guard let self, let panel, let view else { return }
-            let inWindow = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let mouse = NSEvent.mouseLocation
+            // Hover has to work on whichever screen the pointer is on.
+            if let s = self.screen, !s.frame.contains(mouse) {
+                self.follow(NSScreen.screens.first { $0.frame.contains(mouse) })
+            }
+            let inWindow = panel.convertPoint(fromScreen: mouse)
             let inView = view.convert(inWindow, from: nil)
             self.setHovering(view.hoverRect.contains(inView))
         }
@@ -1287,10 +1398,11 @@ private final class IslandController {
         view.notesModel.load(json: json)
     }
 
-    /// True only on displays with a camera housing; callers fall back to the
-    /// webview overlay when this is false.
-    func hasNotch() -> Bool {
-        NSScreen.screens.contains { notchMetrics(of: $0) != nil }
+    /// The island works on every screen (virtual on non-notch ones); it only
+    /// needs the safe-area APIs to tell them apart.
+    func available() -> Bool {
+        if #available(macOS 12.0, *) { return true }
+        return false
     }
 
     func prepare() {
@@ -1302,6 +1414,8 @@ private final class IslandController {
     /// would restart the timer and re-run the reveal.
     func show() {
         guard let (_, view) = ensurePanel() else { return }
+        // Where the text will land is where the island should be.
+        follow(workingScreen())
         pendingPeek?.cancel()
         pendingUnpeek?.cancel()
         if expanded {
@@ -1369,9 +1483,9 @@ private final class IslandController {
 @_cdecl("notch_overlay_available")
 public func notch_overlay_available() -> Int32 {
     if Thread.isMainThread {
-        return IslandController.shared.hasNotch() ? 1 : 0
+        return IslandController.shared.available() ? 1 : 0
     }
-    return DispatchQueue.main.sync { IslandController.shared.hasNotch() ? 1 : 0 }
+    return DispatchQueue.main.sync { IslandController.shared.available() ? 1 : 0 }
 }
 
 /// Put the island on screen at rest so hover works before the first

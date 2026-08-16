@@ -1163,6 +1163,7 @@ uncovered_bindings: string[];
  * warning banner appears and explains why recording refused.
  */
 recorder_blocked: boolean }
+export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type Situation = { 
 /**
  * Localised app name, e.g. "Safari".
@@ -1176,7 +1177,6 @@ title: string | null;
  * Page URL, browsers only.
  */
 url: string | null }
-export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type SoundTheme = "marimba" | "pop" | "custom"
 /**
  * Phase of the streaming overlay card, emitted to drive its UI state.
