@@ -116,8 +116,11 @@ private func springAnimation(keyPath: String, duration: CFTimeInterval, bounce: 
 /// The island outline, centred: x in -w/2...w/2, y in 0 (bottom)...h (top).
 /// Every layer uses this frame anchored at top-centre, so no position depends
 /// on the current width and nothing can drift while the bounds spring.
-private func islandPath(size: CGSize, cornerRadius r: CGFloat, flare f: CGFloat, closed: Bool = true) -> CGPath {
-    let raw = islandPathLeftOrigin(size: size, cornerRadius: r, flare: f, closed: closed)
+private func islandPath(
+    size: CGSize, cornerRadius r: CGFloat, flare f: CGFloat,
+    topRadius t: CGFloat = 0, topInset i: CGFloat = 0, closed: Bool = true
+) -> CGPath {
+    let raw = islandPathLeftOrigin(size: size, cornerRadius: r, flare: f, topRadius: t, topInset: i, closed: closed)
     var shift = CGAffineTransform(translationX: -size.width / 2, y: 0)
     return raw.copy(using: &shift) ?? raw
 }
@@ -127,27 +130,51 @@ private func islandBounds(_ size: CGSize) -> CGRect {
     CGRect(x: -size.width / 2, y: 0, width: size.width, height: size.height)
 }
 
+/// One path grammar for two shapes, so CA can spring between them:
+/// - Notch: square top corners on the screen edge, concave `flare` fillets
+///   into the walls, round bottom corners (`cornerRadius`).
+/// - Free-floating pill (screens without a housing, at rest): convex top
+///   corners of `topRadius`, top edge `topInset` below the screen edge,
+///   no flares. With `topRadius == 0` and `topInset == 0` it is the
+///   attached box the virtual island opens into.
+/// Element sequence is identical in every case — move, curve, line, curve,
+/// line, curve, line, curve, close — which is what path animation requires.
+///
 /// `closed: false` leaves out the top edge — the segment along the screen
 /// edge — for stroking: the fill needs it, but a key line drawn there is a
 /// seam between the island and the housing, and lightens the island's top so
 /// it no longer matches the notch's black.
-private func islandPathLeftOrigin(size: CGSize, cornerRadius r: CGFloat, flare f: CGFloat, closed: Bool) -> CGPath {
+private func islandPathLeftOrigin(
+    size: CGSize, cornerRadius r: CGFloat, flare f: CGFloat,
+    topRadius t: CGFloat, topInset i: CGFloat, closed: Bool
+) -> CGPath {
     let w = size.width
-    let h = size.height
+    let h = size.height - i
     let path = CGMutablePath()
+    let kappa: CGFloat = 0.5523
 
-    // Top-left outer corner, on the screen edge.
-    path.move(to: CGPoint(x: 0, y: h))
-    // Concave fillet: curve from the edge down into the left wall at x = f.
-    path.addQuadCurve(to: CGPoint(x: f, y: h - f), control: CGPoint(x: f, y: h))
+    // Top-left: either the flare's start on the screen edge (t == 0) or the
+    // pill's rounded corner (f == 0). Only one of f, t is ever non-zero.
+    let tlStart = CGPoint(x: t, y: h)
+    let tlEnd = CGPoint(x: f, y: h - f - t)
+    path.move(to: tlStart)
+    if t > 0 {
+        let k = kappa * t
+        path.addCurve(to: tlEnd, control1: CGPoint(x: t - k, y: h), control2: CGPoint(x: 0, y: h - t + k))
+    } else {
+        // Concave fillet as a cubic: the quad with control (f, h), lifted.
+        let c = CGPoint(x: f, y: h)
+        path.addCurve(
+            to: tlEnd,
+            control1: CGPoint(x: tlStart.x + (c.x - tlStart.x) * 2 / 3, y: tlStart.y + (c.y - tlStart.y) * 2 / 3),
+            control2: CGPoint(x: tlEnd.x + (c.x - tlEnd.x) * 2 / 3, y: tlEnd.y + (c.y - tlEnd.y) * 2 / 3)
+        )
+    }
     // Left wall.
     path.addLine(to: CGPoint(x: f, y: r))
-    // Bottom corners are true circular arcs (cubic, kappa 0.5523) — a quad
-    // curve is a parabola, visibly flat and pointed once the radius grows
-    // past what a notch's flares hide. One element each, so path animations
-    // between states keep matching segment counts.
-    let k = 0.5523 * r
-    // Bottom-left round.
+    // Bottom corners are true circular arcs (cubic, kappa) — a quad curve is
+    // a parabola, visibly flat once the radius grows.
+    let k = kappa * r
     path.addCurve(
         to: CGPoint(x: f + r, y: 0),
         control1: CGPoint(x: f, y: r - k),
@@ -155,16 +182,26 @@ private func islandPathLeftOrigin(size: CGSize, cornerRadius r: CGFloat, flare f
     )
     // Bottom edge.
     path.addLine(to: CGPoint(x: w - f - r, y: 0))
-    // Bottom-right round.
     path.addCurve(
         to: CGPoint(x: w - f, y: r),
         control1: CGPoint(x: w - f - r + k, y: 0),
         control2: CGPoint(x: w - f, y: r - k)
     )
     // Right wall.
-    path.addLine(to: CGPoint(x: w - f, y: h - f))
-    // Concave fillet back out to the edge.
-    path.addQuadCurve(to: CGPoint(x: w, y: h), control: CGPoint(x: w - f, y: h))
+    let trStart = CGPoint(x: w - f, y: h - f - t)
+    let trEnd = CGPoint(x: w - t, y: h)
+    path.addLine(to: trStart)
+    if t > 0 {
+        let k = kappa * t
+        path.addCurve(to: trEnd, control1: CGPoint(x: w, y: h - t + k), control2: CGPoint(x: w - t + k, y: h))
+    } else {
+        let c = CGPoint(x: w - f, y: h)
+        path.addCurve(
+            to: trEnd,
+            control1: CGPoint(x: trStart.x + (c.x - trStart.x) * 2 / 3, y: trStart.y + (c.y - trStart.y) * 2 / 3),
+            control2: CGPoint(x: trEnd.x + (c.x - trEnd.x) * 2 / 3, y: trEnd.y + (c.y - trEnd.y) * 2 / 3)
+        )
+    }
     if closed { path.closeSubpath() }
     return path
 }
@@ -439,7 +476,7 @@ private final class IslandView: NSView {
     /// top-centre (over the empty middle of the menu bar) and grows from it;
     /// open and expanded use the full MacBook-sized width so the hints fit.
     /// Alcove's resting pill is about 2.6× as wide as it is tall.
-    private var virtualPillWidth: CGFloat { max(56, safeAreaTop * 2.6 - Island.overhang(.closed) * 2) }
+    private var virtualPillWidth: CGFloat { max(56, (safeAreaTop - topInset(.closed)) * 2.6 - Island.overhang(.closed) * 2) }
     private func baseWidth(_ s: IslandState) -> CGFloat {
         synthetic && (s == .closed || s == .peek) ? virtualPillWidth : cutoutWidth
     }
@@ -453,10 +490,24 @@ private final class IslandView: NSView {
 
     /// Without flares the bottom corners carry the whole shape, so a virtual
     /// island rounds them more once it has grown (Alcove's proportions).
+    /// At rest the virtual island floats a hair below the screen edge as a
+    /// full stadium (all four corners round); opening attaches it to the
+    /// edge, square-topped, like the box it becomes.
+    private func topInset(_ s: IslandState) -> CGFloat {
+        synthetic && (s == .closed || s == .peek) ? 2 : 0
+    }
+    private func topRadius(_ s: IslandState) -> CGFloat {
+        synthetic && (s == .closed || s == .peek) ? cornerRadius(s) : 0
+    }
     private func cornerRadius(_ s: IslandState) -> CGFloat {
         guard synthetic else { return Island.cornerRadius(s) }
-        // Closed is a true pill: bottom radius = half its height.
-        return switch s { case .closed: safeAreaTop / 2; case .peek: 16; case .open: 34; case .expanded: 40 }
+        // Resting states are stadiums: radius = half the visible height.
+        return switch s {
+        case .closed: (safeAreaTop + Island.chinHeight(.closed) - topInset(.closed)) / 2
+        case .peek: (safeAreaTop + Island.chinHeight(.peek) - topInset(.peek)) / 2
+        case .open: 34
+        case .expanded: 40
+        }
     }
 
     /// AppKit's y axis points up, so the pill hangs from the top of the view.
@@ -474,7 +525,7 @@ private final class IslandView: NSView {
     }
 
     private func path(for size: CGSize, _ s: IslandState, closed: Bool = true) -> CGPath {
-        islandPath(size: size, cornerRadius: cornerRadius(s), flare: flare(s), closed: closed)
+        islandPath(size: size, cornerRadius: cornerRadius(s), flare: flare(s), topRadius: topRadius(s), topInset: topInset(s), closed: closed)
     }
 
     /// The pill's current footprint plus hover slop, in view coordinates.
@@ -1194,11 +1245,12 @@ private func screenMetrics(of screen: NSScreen) -> ScreenMetrics {
             synthetic: false
         )
     }
-    // Just shy of the menu bar's height (Alcove's pill stops a hair above
-    // its bottom edge), or a housing-like 24 when the bar is hidden.
+    // Just shy of the menu bar's height (the resting pill floats 2pt below
+    // the edge and stops a hair above the bar's bottom), or a housing-like
+    // 24 when the bar is hidden.
     let menuBar = screen.frame.maxY - screen.visibleFrame.maxY
     return ScreenMetrics(
-        safeAreaTop: menuBar > 0 ? max(menuBar - 2, 20) : 24,
+        safeAreaTop: menuBar > 0 ? menuBar - 2 : 24,
         cutoutWidth: 180,
         synthetic: true
     )
