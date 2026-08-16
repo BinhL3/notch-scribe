@@ -337,6 +337,12 @@ private final class IslandView: NSView {
     private var safeAreaTop: CGFloat = 32
     /// No hardware housing on this screen: draw nothing at rest.
     private var synthetic = false
+    /// Another notch app owns the resting state; we draw nothing closed.
+    private var yielding = false
+    func setYielding(_ y: Bool) {
+        yielding = y
+        if state == .closed { layoutPill(.closed, animated: false) }
+    }
     /// Backing scale of the screen the island is on.
     private var contentScale: CGFloat = 2
     private(set) var state: IslandState = .closed
@@ -480,7 +486,7 @@ private final class IslandView: NSView {
     private func baseWidth(_ s: IslandState) -> CGFloat {
         synthetic && (s == .closed || s == .peek) ? virtualPillWidth : cutoutWidth
     }
-    private func pillVisible(_ s: IslandState) -> Bool { true }
+    private func pillVisible(_ s: IslandState) -> Bool { !(yielding && s == .closed) }
 
     /// The concave fillets sell the island as part of a housing. With no
     /// housing they are chrome pretending to be hardware, so a virtual island
@@ -1257,6 +1263,29 @@ private func screenMetrics(of screen: NSScreen) -> ScreenMetrics {
     )
 }
 
+/// Other apps that live in the notch. One notch: when one of these is
+/// running Noi yields the resting state to it — draws nothing at rest,
+/// ignores hover and click — and only appears, above it, while it has
+/// something to say (dictating, refining, a result).
+private let notchAppBundleIds: Set<String> = [
+    "com.henrikruscon.Alcove",
+    "theboringteam.boringnotch",
+    "com.lo.NotchNook",
+    "com.notchnook.NotchNook",
+    "com.dynamiclake.DynamicLake",
+    "com.notchmeister.Notchmeister",
+    "com.mediaflow.MediaMate",
+]
+
+private func otherNotchAppRunning() -> Bool {
+    NSWorkspace.shared.runningApplications.contains { app in
+        if let id = app.bundleIdentifier, notchAppBundleIds.contains(id) { return true }
+        let name = app.localizedName?.lowercased() ?? ""
+        return name == "alcove" || name.contains("boringnotch") || name.contains("boring.notch")
+            || name.contains("notchnook") || name.contains("dynamiclake")
+    }
+}
+
 /// The screen the user is working on: where the frontmost app's focused
 /// window is (that is where dictation lands), else under the pointer, else
 /// the notched one, else the first. `NSScreen.main` is wrong here — it is
@@ -1316,6 +1345,9 @@ private final class IslandController {
     /// The screen the panel currently sits on.
     private var screen: NSScreen?
     private var screenObserver: Any?
+    /// Another notch app is running: we yield the resting state to it.
+    private(set) var yielding = false
+    private var appObservers: [Any] = []
 
     private func ensurePanel() -> (NSPanel, IslandView)? {
         if let panel, let view { return (panel, view) }
@@ -1353,7 +1385,27 @@ private final class IslandController {
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.screensChanged() }
+        updateYielding()
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            appObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in self?.updateYielding() })
+        }
         return (panel, view)
+    }
+
+    /// One notch: with Alcove & co. running, Noi is invisible at rest and
+    /// stays above them while open. Level moves with the mode so a yielded
+    /// island never sits over theirs when it has nothing to show.
+    private func updateYielding() {
+        let now = otherNotchAppRunning()
+        guard now != yielding else { return }
+        yielding = now
+        guard let panel, let view else { return }
+        panel.level = now ? .screenSaver : .statusBar
+        view.setYielding(now)
+        if now, view.state == .peek, !recording { view.layoutPill(.closed, animated: true) }
+        if now, expanded { collapse() }
     }
 
     /// Size and position the panel for a screen. Wide and tall enough for the
@@ -1425,7 +1477,7 @@ private final class IslandController {
             let onIsland = view.hoverRect.contains(inView)
             if self.expanded {
                 if !onIsland { self.collapse() }
-            } else if onIsland, !self.recording {
+            } else if onIsland, !self.recording, !self.yielding {
                 self.expand()
             }
         }
@@ -1446,7 +1498,7 @@ private final class IslandController {
     private func setHovering(_ now: Bool) {
         guard now != hovering else { return }
         hovering = now
-        guard !recording, let view else { return }
+        guard !recording, !yielding, let view else { return }
         if now {
             pendingUnpeek?.cancel()
             // A dwell, so a pointer merely crossing the top edge on its way
