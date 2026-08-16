@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn notch_overlay_prepare();
     fn notch_overlay_show();
     fn notch_overlay_hide();
+    fn notch_overlay_show_notes();
     fn notch_overlay_set_mode(mode: i32);
     fn notch_overlay_finish(outcome: i32);
     fn notch_overlay_set_clock(enabled: i32);
@@ -51,6 +52,14 @@ pub fn show() {
         return;
     }
     unsafe { notch_overlay_show() }
+}
+
+/// Expand the island on the notes inbox (tray → Notes).
+pub fn show_notes() {
+    if !is_available() {
+        return;
+    }
+    unsafe { notch_overlay_show_notes() }
 }
 
 pub fn hide() {

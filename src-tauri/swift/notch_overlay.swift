@@ -1523,6 +1523,15 @@ private final class IslandController {
 
     // MARK: Notes list
 
+    /// Open the inbox on the working screen, ignoring the yield rule.
+    func showNotes() {
+        guard let (_, view) = ensurePanel(), !recording else { return }
+        follow(workingScreen())
+        if expanded { collapse(); return }
+        _ = view
+        expand()
+    }
+
     func expand() {
         guard let panel, let view, !expanded else { return }
         expanded = true
@@ -1701,6 +1710,13 @@ public func notch_overlay_finish(_ outcome: Int32) {
     default: (ok, label) = (false, "Couldn't do that")
     }
     DispatchQueue.main.async { IslandController.shared.finish(ok: ok, label: label) }
+}
+
+/// Expand on the notes inbox on request (tray menu). Works while yielding to
+/// another notch app: an explicit ask, unlike hover/click on the notch.
+@_cdecl("notch_overlay_show_notes")
+public func notch_overlay_show_notes() {
+    DispatchQueue.main.async { IslandController.shared.showNotes() }
 }
 
 @_cdecl("notch_overlay_hide")

@@ -17,6 +17,7 @@ int notch_overlay_available(void);
 // Spring the island open / closed. Idempotent.
 void notch_overlay_show(void);
 void notch_overlay_hide(void);
+void notch_overlay_show_notes(void);
 
 // Microphone level, 0.0 ... 1.0.
 void notch_overlay_set_level(float level);

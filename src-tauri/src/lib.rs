@@ -286,6 +286,18 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             "copy_last_transcript" => {
                 tray::copy_last_transcript(app);
             }
+            "notes" => {
+                // The island inbox, from the menu bar — the way in when the
+                // notch itself belongs to another app.
+                #[cfg(target_os = "macos")]
+                if native_notch::is_available() {
+                    native_notch::show_notes();
+                } else {
+                    show_main_window(app);
+                }
+                #[cfg(not(target_os = "macos"))]
+                show_main_window(app);
+            }
             "unload_model" => {
                 let transcription_manager = app.state::<Arc<TranscriptionManager>>();
                 if !transcription_manager.is_model_loaded() {
