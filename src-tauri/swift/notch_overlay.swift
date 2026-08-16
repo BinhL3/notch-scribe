@@ -142,12 +142,25 @@ private func islandPathLeftOrigin(size: CGSize, cornerRadius r: CGFloat, flare f
     path.addQuadCurve(to: CGPoint(x: f, y: h - f), control: CGPoint(x: f, y: h))
     // Left wall.
     path.addLine(to: CGPoint(x: f, y: r))
+    // Bottom corners are true circular arcs (cubic, kappa 0.5523) — a quad
+    // curve is a parabola, visibly flat and pointed once the radius grows
+    // past what a notch's flares hide. One element each, so path animations
+    // between states keep matching segment counts.
+    let k = 0.5523 * r
     // Bottom-left round.
-    path.addQuadCurve(to: CGPoint(x: f + r, y: 0), control: CGPoint(x: f, y: 0))
+    path.addCurve(
+        to: CGPoint(x: f + r, y: 0),
+        control1: CGPoint(x: f, y: r - k),
+        control2: CGPoint(x: f + r - k, y: 0)
+    )
     // Bottom edge.
     path.addLine(to: CGPoint(x: w - f - r, y: 0))
     // Bottom-right round.
-    path.addQuadCurve(to: CGPoint(x: w - f, y: r), control: CGPoint(x: w - f, y: 0))
+    path.addCurve(
+        to: CGPoint(x: w - f, y: r),
+        control1: CGPoint(x: w - f - r + k, y: 0),
+        control2: CGPoint(x: w - f, y: r - k)
+    )
     // Right wall.
     path.addLine(to: CGPoint(x: w - f, y: h - f))
     // Concave fillet back out to the edge.
@@ -287,6 +300,8 @@ private final class IslandView: NSView {
     private var safeAreaTop: CGFloat = 32
     /// No hardware housing on this screen: draw nothing at rest.
     private var synthetic = false
+    /// Backing scale of the screen the island is on.
+    private var contentScale: CGFloat = 2
     private(set) var state: IslandState = .closed
 
     override init(frame: NSRect) {
@@ -362,7 +377,7 @@ private final class IslandView: NSView {
         content.addSublayer(checkStroke)
 
         symbol.contentsGravity = .resizeAspect
-        symbol.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        symbol.contentsScale = 2
         content.addSublayer(symbol)
 
         label.font = Text.font
@@ -370,14 +385,14 @@ private final class IslandView: NSView {
         label.foregroundColor = NSColor.white.cgColor
         label.alignmentMode = .left
         label.truncationMode = .end
-        label.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        label.contentsScale = 2
 
         sublabel.font = Text.subFont
         sublabel.fontSize = Text.subFont.pointSize
         sublabel.foregroundColor = NSColor.white.withAlphaComponent(0.55).cgColor
         sublabel.alignmentMode = .left
         sublabel.truncationMode = .end
-        sublabel.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        sublabel.contentsScale = 2
         content.addSublayer(sublabel)
 
         halo.backgroundColor = WavePalette.instruct[0].withAlphaComponent(0.35).cgColor
@@ -400,7 +415,7 @@ private final class IslandView: NSView {
         timer.foregroundColor = NSColor.white.withAlphaComponent(0.92).cgColor
         timer.alignmentMode = .left
         timer.truncationMode = .none
-        timer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        timer.contentsScale = 2
         content.addSublayer(timer)
 
         // Above the contents so the hairline is never painted over.
@@ -409,10 +424,14 @@ private final class IslandView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat, synthetic: Bool) {
+    func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat, synthetic: Bool, scale: CGFloat) {
         self.cutoutWidth = cutoutWidth
         self.safeAreaTop = safeAreaTop
         self.synthetic = synthetic
+        // Text and glyphs rasterise for the screen the island is on — a 1×
+        // external display drawn at 2× (or the reverse) looks soft.
+        contentScale = scale
+        for l in [symbol, label, sublabel, timer] as [CALayer] { l.contentsScale = scale }
         layoutPill(.closed, animated: false)
     }
 
@@ -903,7 +922,9 @@ private final class IslandView: NSView {
         checkStroke.add(draw, forKey: "draw")
     }
 
-    /// A tinted SF Symbol as a CGImage, at 2x for Retina.
+    /// A tinted SF Symbol as a CGImage, rasterised for the screen's scale.
+    /// Without the CTM hint `cgImage(forProposedRect:)` renders at 1× and
+    /// the glyph is soft on Retina.
     private func symbolImage(_ name: String, size: CGFloat, color: NSColor) -> CGImage? {
         guard #available(macOS 12.0, *) else { return nil }
         let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)
@@ -911,7 +932,10 @@ private final class IslandView: NSView {
             .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
         guard let image = base?.withSymbolConfiguration(config) else { return nil }
         var rect = CGRect(origin: .zero, size: image.size)
-        return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        let hints: [NSImageRep.HintKey: Any] = [
+            .ctm: NSAffineTransform(transform: AffineTransform(scale: contentScale)),
+        ]
+        return image.cgImage(forProposedRect: &rect, context: nil, hints: hints)
     }
 
     /// How long the wave settles on release before the next mode is revealed.
@@ -1284,7 +1308,7 @@ private final class IslandController {
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
         view.frame = NSRect(origin: .zero, size: size)
-        view.configure(cutoutWidth: m.cutoutWidth, safeAreaTop: m.safeAreaTop, synthetic: m.synthetic)
+        view.configure(cutoutWidth: m.cutoutWidth, safeAreaTop: m.safeAreaTop, synthetic: m.synthetic, scale: target.backingScaleFactor)
         screen = target
     }
 
