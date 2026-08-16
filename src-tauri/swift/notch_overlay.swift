@@ -1266,8 +1266,9 @@ private final class IslandController {
             defer: false
         )
         panel.isFloatingPanel = true
-        // Above the menu bar: on a non-notch screen the island hangs over it.
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
+        // .statusBar already sits above the menu bar, which is what a virtual
+        // island needs; higher levels changed how the panel behaved.
+        panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
