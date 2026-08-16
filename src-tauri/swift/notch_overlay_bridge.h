@@ -1,6 +1,8 @@
 #ifndef notch_overlay_bridge_h
 #define notch_overlay_bridge_h
 
+#include <stdint.h>
+
 // C interface to the native notch overlay (see swift/notch_overlay.swift).
 // Every function is safe to call from any thread; the Swift side hops to the
 // main thread itself, because AppKit requires it and Rust calls in from the
@@ -18,6 +20,9 @@ int notch_overlay_available(void);
 void notch_overlay_show(void);
 void notch_overlay_hide(void);
 void notch_overlay_show_notes(void);
+void notch_overlay_set_now_playing(const char *json);
+typedef void (*notch_media_action_cb)(int32_t action, int64_t arg);
+void notch_overlay_set_media_callback(notch_media_action_cb cb);
 
 // Microphone level, 0.0 ... 1.0.
 void notch_overlay_set_level(float level);

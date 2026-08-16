@@ -5,6 +5,8 @@
 import AppKit
 import QuartzCore
 import CoreImage
+import CoreAudio
+import AudioToolbox
 import SwiftUI
 
 // MARK: - Geometry
@@ -258,12 +260,16 @@ private final class IslandView: NSView {
     /// The notes list (SwiftUI) shown in the expanded state. An NSView, so it
     /// sits above the layers; faded in once the shape has grown.
     let notesModel = NotesModel()
+    let mediaModel = NowPlayingModel()
+    /// Which card the expanded island shows; the player when something is
+    /// playing, else the inbox. The user can flip it from the card.
+    let expandedTab = ExpandedTab()
     private var notesHostView: NSView?
     /// Created on first use; nil before macOS 14 (no notch Mac runs that).
     private var notesHost: NSView? {
         if let notesHostView { return notesHostView }
         guard #available(macOS 14.0, *) else { return nil }
-        let h = NSHostingView(rootView: NotesListView(model: notesModel))
+        let h = NSHostingView(rootView: ExpandedView(notes: notesModel, media: mediaModel, tab: expandedTab))
         h.alphaValue = 0
         h.isHidden = true
         addSubview(h)
@@ -335,6 +341,12 @@ private final class IslandView: NSView {
 
     private var cutoutWidth: CGFloat = 186
     private var safeAreaTop: CGFloat = 32
+    /// The expanded chin depends on what it shows: the player card is
+    /// shorter than the notes list. Set before layoutPill(.expanded).
+    var expandedChin: CGFloat = Island.chinHeight(.expanded)
+    private func chinHeight(_ s: IslandState) -> CGFloat {
+        s == .expanded ? expandedChin : Island.chinHeight(s)
+    }
     /// No hardware housing on this screen: draw nothing at rest.
     private var synthetic = false
     /// Another notch app owns the resting state; we draw nothing closed.
@@ -511,7 +523,7 @@ private final class IslandView: NSView {
         guard synthetic else { return Island.cornerRadius(s) }
         return switch s {
         // Resting states are stadiums: radius = half the visible height.
-        case .closed, .peek: (housing(s) + Island.chinHeight(s) - topInset(s)) / 2
+        case .closed, .peek: (housing(s) + chinHeight(s) - topInset(s)) / 2
         case .open: 30
         case .expanded: 36
         }
@@ -522,7 +534,7 @@ private final class IslandView: NSView {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
         let width = baseWidth(s) + (Island.overhang(s) + flare(s)) * 2
-        let height = housing(s) + Island.chinHeight(s)
+        let height = housing(s) + chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
             y: bounds.height - height,
@@ -551,7 +563,7 @@ private final class IslandView: NSView {
             x: f.minX + inset,
             y: f.minY + 8,
             width: f.width - inset * 2,
-            height: Island.chinHeight(s) - 12
+            height: chinHeight(s) - 12
         )
     }
 
@@ -585,7 +597,7 @@ private final class IslandView: NSView {
 
     func layoutPill(_ s: IslandState, animated: Bool) {
         layoutNotesHost(for: s, animated: animated)
-        let growing = Island.chinHeight(s) > Island.chinHeight(state)
+        let growing = chinHeight(s) > chinHeight(state)
         let leavingOpen = state == .open && s != .open
         state = s
         let target = pillFrame(s)
@@ -1540,6 +1552,9 @@ private final class IslandController {
         // The panel takes the mouse only while expanded, so it never steals
         // menu-bar clicks at rest.
         panel.ignoresMouseEvents = false
+        view.expandedTab.tab = view.mediaModel.playing ? .player : .notes
+        view.expandedTab.onChange = { [weak self] in self?.relayoutExpanded() }
+        view.expandedChin = expandedChinHeight(for: view.expandedTab.tab)
         view.setMode(.notes)
         view.layoutPill(.expanded, animated: true)
     }
@@ -1558,6 +1573,25 @@ private final class IslandController {
     func setNotes(json: String) {
         guard let (_, view) = ensurePanel() else { return }
         view.notesModel.load(json: json)
+    }
+
+    func setNowPlaying(json: String) {
+        guard let (_, view) = ensurePanel() else { return }
+        view.mediaModel.load(json: json)
+        // Media went away while the player was showing: fall back to notes.
+        if expanded, view.expandedTab.tab == .player, !view.mediaModel.available {
+            view.expandedTab.tab = .notes
+            relayoutExpanded()
+        }
+    }
+
+    /// The card decides the expanded height; re-spring when it changes.
+    func relayoutExpanded() {
+        guard let view, expanded else { return }
+        let h = expandedChinHeight(for: view.expandedTab.tab)
+        guard h != view.expandedChin else { return }
+        view.expandedChin = h
+        view.layoutPill(.expanded, animated: true)
     }
 
     /// The island works on every screen (virtual on non-notch ones); it only
@@ -1717,6 +1751,23 @@ public func notch_overlay_finish(_ outcome: Int32) {
 @_cdecl("notch_overlay_show_notes")
 public func notch_overlay_show_notes() {
     DispatchQueue.main.async { IslandController.shared.showNotes() }
+}
+
+/// Now-playing JSON from Rust (media.rs); {} when nothing is playing.
+@_cdecl("notch_overlay_set_now_playing")
+public func notch_overlay_set_now_playing(_ json: UnsafePointer<CChar>?) {
+    let s = json.map { String(cString: $0) } ?? "{}"
+    DispatchQueue.main.async { IslandController.shared.setNowPlaying(json: s) }
+}
+
+/// Rust registers a callback for the player's transport:
+/// 1 = toggle play/pause, 2 = next, 3 = previous, 4 = seek (arg = µs).
+public typealias MediaActionCallback = @convention(c) (Int32, Int64) -> Void
+nonisolated(unsafe) var mediaActionCallback: MediaActionCallback?
+
+@_cdecl("notch_overlay_set_media_callback")
+public func notch_overlay_set_media_callback(_ cb: MediaActionCallback?) {
+    mediaActionCallback = cb
 }
 
 @_cdecl("notch_overlay_hide")
@@ -1944,5 +1995,319 @@ struct NotesListView: View {
         .contentShape(Rectangle())
         .onTapGesture { model.copy(n) }
         .opacity(clearing ? 0.6 : 1)
+    }
+}
+
+
+// MARK: - Expanded card: Now Playing · Notes
+
+enum ExpandedCard { case player, notes }
+
+/// Chin height per card: the player is a compact block, the inbox a list.
+private func expandedChinHeight(for tab: ExpandedCard) -> CGFloat {
+    switch tab { case .player: 196; case .notes: Island.chinHeight(.expanded) }
+}
+
+/// Which card is showing. A tiny observable so the SwiftUI switch and the
+/// AppKit island (which owns the height) agree.
+final class ExpandedTab: ObservableObject {
+    @Published var tab: ExpandedCard = .notes { didSet { if tab != oldValue { onChange?() } } }
+    var onChange: (() -> Void)?
+}
+
+/// Now-playing state as Rust streams it (see media.rs). Artwork arrives only
+/// when it changes (`artworkKey`), so we keep the last image.
+final class NowPlayingModel: ObservableObject {
+    @Published var title = ""
+    @Published var artist = ""
+    @Published var album = ""
+    @Published var playing = false
+    @Published var bundleId: String?
+    @Published var durationMicros: Int64 = 0
+    /// Elapsed at `timestampMicros` (epoch µs); the view extrapolates.
+    @Published var elapsedMicros: Int64 = 0
+    @Published var timestampMicros: Int64 = 0
+    @Published var artwork: NSImage?
+    @Published var accent: Color = .white
+    private var artworkKey: UInt64 = 0
+
+    var available: Bool { !title.isEmpty }
+
+    func load(json: String) {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        title = obj["title"] as? String ?? ""
+        artist = obj["artist"] as? String ?? ""
+        album = obj["album"] as? String ?? ""
+        playing = obj["playing"] as? Bool ?? false
+        bundleId = obj["bundleIdentifier"] as? String
+        durationMicros = Self.int64(obj["durationMicros"])
+        elapsedMicros = Self.int64(obj["elapsedTimeMicros"])
+        timestampMicros = Self.int64(obj["timestampEpochMicros"])
+        let key = UInt64(Self.int64(obj["artworkKey"]))
+        if key != artworkKey || (key != 0 && artwork == nil) {
+            if let b64 = obj["artworkData"] as? String, let d = Data(base64Encoded: b64), let img = NSImage(data: d) {
+                artwork = img
+                accent = Self.dominantColor(of: img) ?? .white
+                artworkKey = key
+            } else if key == 0 {
+                artwork = nil
+                accent = .white
+                artworkKey = 0
+            }
+        }
+        if !available { artwork = nil; artworkKey = 0 }
+    }
+
+    /// Where playback is right now, in seconds.
+    func elapsedNow(at date: Date) -> Double {
+        var e = Double(elapsedMicros) / 1_000_000
+        if playing, timestampMicros > 0 {
+            e += date.timeIntervalSince1970 - Double(timestampMicros) / 1_000_000
+        }
+        return max(0, min(e, duration))
+    }
+    var duration: Double { Double(durationMicros) / 1_000_000 }
+
+    private static func int64(_ v: Any?) -> Int64 {
+        if let n = v as? NSNumber { return n.int64Value }
+        return 0
+    }
+
+    /// Average colour of the artwork, lifted a little so it reads on black.
+    private static func dominantColor(of image: NSImage) -> Color? {
+        guard let tiff = image.tiffRepresentation, let ci = CIImage(data: tiff) else { return nil }
+        let extent = ci.extent
+        guard let filter = CIFilter(name: "CIAreaAverage", parameters: [kCIInputImageKey: ci, kCIInputExtentKey: CIVector(cgRect: extent)]),
+              let out = filter.outputImage else { return nil }
+        var px = [UInt8](repeating: 0, count: 4)
+        CIContext(options: [.workingColorSpace: NSNull()]).render(out, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
+        var c = NSColor(red: CGFloat(px[0]) / 255, green: CGFloat(px[1]) / 255, blue: CGFloat(px[2]) / 255, alpha: 1)
+        c = c.usingColorSpace(.deviceRGB) ?? c
+        // Keep it vivid and light enough on black.
+        let sat = min(1, c.saturationComponent * 1.3)
+        let bri = max(0.7, c.brightnessComponent)
+        return Color(NSColor(hue: c.hueComponent, saturation: sat, brightness: bri, alpha: 1))
+    }
+}
+
+/// System output volume via CoreAudio — the card's slider talks to it
+/// directly, no round trip through Rust.
+enum SystemVolume {
+    private static func device() -> AudioObjectID? {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var id = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr else { return nil }
+        return id
+    }
+    private static var addr: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    }
+    static func get() -> Float {
+        guard let dev = device() else { return 0 }
+        var a = addr
+        var v: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &v) == noErr else { return 0 }
+        return v
+    }
+    static func set(_ value: Float) {
+        guard let dev = device() else { return }
+        var a = addr
+        var v = Float32(max(0, min(1, value)))
+        AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+    }
+}
+
+@available(macOS 14.0, *)
+struct ExpandedView: View {
+    @ObservedObject var notes: NotesModel
+    @ObservedObject var media: NowPlayingModel
+    @ObservedObject var tab: ExpandedTab
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if tab.tab == .player && media.available {
+                    NowPlayingView(model: media)
+                        .transition(.opacity)
+                } else {
+                    NotesListView(model: notes)
+                        .transition(.opacity)
+                }
+            }
+            // The other card, one quiet glyph away. Only when there is one.
+            if media.available {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        tab.tab = tab.tab == .player ? .notes : .player
+                    }
+                } label: {
+                    Image(systemName: tab.tab == .player ? "list.bullet" : "music.note")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 6)
+                .padding(.trailing, 8)
+            }
+        }
+        .foregroundStyle(.white)
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// Alcove-style player: artwork · title/artist · progress · transport · volume.
+@available(macOS 14.0, *)
+struct NowPlayingView: View {
+    @ObservedObject var model: NowPlayingModel
+    @State private var scrubbing: Double? = nil
+    @State private var volume: Float = SystemVolume.get()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                artwork
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                    Text(model.artist.isEmpty ? model.album : model.artist)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Bars(playing: model.playing, color: model.accent)
+                    .frame(width: 18, height: 14)
+                    .padding(.trailing, 30) // room for the card switch
+            }
+            timeline
+            HStack(spacing: 34) {
+                transport("backward.fill", size: 18) { mediaActionCallback?(3, 0) }
+                transport(model.playing ? "pause.fill" : "play.fill", size: 26) { mediaActionCallback?(1, 0) }
+                transport("forward.fill", size: 18) { mediaActionCallback?(2, 0) }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 2)
+            volumeRow
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+
+    private var artwork: some View {
+        Group {
+            if let img = model.artwork {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(0.08))
+                    Image(systemName: "music.note").font(.system(size: 18)).foregroundStyle(.white.opacity(0.4))
+                }
+            }
+        }
+        .frame(width: 46, height: 46)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private var timeline: some View {
+        TimelineView(.periodic(from: .now, by: model.playing ? 0.5 : 60)) { ctx in
+            let elapsed = scrubbing ?? model.elapsedNow(at: ctx.date)
+            let total = max(model.duration, 0.001)
+            HStack(spacing: 10) {
+                Text(fmt(elapsed))
+                    .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 38, alignment: .trailing)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.18))
+                        Capsule().fill(model.accent.opacity(0.9))
+                            .frame(width: max(4, geo.size.width * CGFloat(min(1, elapsed / total))))
+                    }
+                    .frame(height: 5)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { g in
+                            scrubbing = Double(max(0, min(1, g.location.x / geo.size.width))) * total
+                        }
+                        .onEnded { g in
+                            let t = Double(max(0, min(1, g.location.x / geo.size.width))) * total
+                            mediaActionCallback?(4, Int64(t * 1_000_000))
+                            // Hold the scrubbed position until the next update lands.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { scrubbing = nil }
+                        })
+                }
+                .frame(height: 16)
+                Text("-" + fmt(max(0, total - elapsed)))
+                    .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 42, alignment: .leading)
+            }
+        }
+    }
+
+    private var volumeRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "speaker.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.18))
+                    Capsule().fill(Color.white.opacity(0.75))
+                        .frame(width: max(4, geo.size.width * CGFloat(volume)))
+                }
+                .frame(height: 4)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                    volume = Float(max(0, min(1, g.location.x / geo.size.width)))
+                    SystemVolume.set(volume)
+                })
+            }
+            .frame(height: 14)
+            Image(systemName: "speaker.wave.2.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func transport(_ name: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name)
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 34)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func fmt(_ t: Double) -> String {
+        let s = Int(t.rounded(.down))
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+/// Four little bars that dance while playing (Alcove's glyph), in the
+/// artwork's colour.
+@available(macOS 14.0, *)
+struct Bars: View {
+    let playing: Bool
+    let color: Color
+    @State private var phase = false
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<4, id: \.self) { i in
+                Capsule().fill(color)
+                    .frame(width: 2.5, height: playing ? (phase ? [10, 6, 13, 8][i] : [5, 12, 7, 11][i]) : 3)
+                    .animation(playing ? .easeInOut(duration: 0.45 + Double(i) * 0.07).repeatForever(autoreverses: true) : .default, value: phase)
+            }
+        }
+        .onAppear { phase = true }
     }
 }

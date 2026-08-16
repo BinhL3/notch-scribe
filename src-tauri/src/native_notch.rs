@@ -18,6 +18,8 @@ unsafe extern "C" {
     fn notch_overlay_show();
     fn notch_overlay_hide();
     fn notch_overlay_show_notes();
+    fn notch_overlay_set_now_playing(json: *const std::os::raw::c_char);
+    fn notch_overlay_set_media_callback(cb: Option<extern "C" fn(i32, i64)>);
     fn notch_overlay_set_mode(mode: i32);
     fn notch_overlay_finish(outcome: i32);
     fn notch_overlay_set_clock(enabled: i32);
@@ -135,6 +137,24 @@ pub fn set_note_callback(cb: extern "C" fn(i32, i64)) {
         return;
     }
     unsafe { notch_overlay_set_note_callback(Some(cb)) }
+}
+
+/// Now-playing state for the island's player card, as JSON (see media.rs).
+pub fn set_now_playing(json: &str) {
+    if !is_available() {
+        return;
+    }
+    let j = std::ffi::CString::new(json).unwrap_or_default();
+    unsafe { notch_overlay_set_now_playing(j.as_ptr()) }
+}
+
+/// Register the handler for the player's transport actions
+/// (1 = toggle, 2 = next, 3 = previous, 4 = seek to `arg` microseconds).
+pub fn set_media_callback(cb: extern "C" fn(i32, i64)) {
+    if !is_available() {
+        return;
+    }
+    unsafe { notch_overlay_set_media_callback(Some(cb)) }
 }
 
 /// Microphone level, clamped to 0.0..=1.0.

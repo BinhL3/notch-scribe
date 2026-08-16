@@ -27,4 +27,4 @@ bun run tauri dev
 
 ## Credits
 
-[Handy](https://github.com/cjpais/Handy) by CJ Pais and contributors (MIT) is the foundation. [Talkify](https://github.com/tornikegomareli/Talkify) by Tornike Gomareli showed how fast Apple's on-device recogniser is. MIT — see [LICENSE](LICENSE).
+[Handy](https://github.com/cjpais/Handy) by CJ Pais and contributors (MIT) is the foundation. [Talkify](https://github.com/tornikegomareli/Talkify) by Tornike Gomareli showed how fast Apple's on-device recogniser is. The Now Playing card reads MediaRemote through [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) by Jonas van den Berg (BSD-3, bundled under `src-tauri/resources/mediaremote`). MIT — see [LICENSE](LICENSE).
