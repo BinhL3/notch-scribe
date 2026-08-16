@@ -21,6 +21,11 @@ async resetBinding(id: string) : Promise<Result<BindingResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Add another key for an action: a new binding "<id>@n" with no key yet.
+ * The UI records into it exactly like any binding; empty bindings are
+ * never registered.
+ */
 async addAlternateBinding(id: string) : Promise<Result<BindingResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("add_alternate_binding", { id }) };

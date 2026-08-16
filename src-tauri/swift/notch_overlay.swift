@@ -435,9 +435,15 @@ private final class IslandView: NSView {
         layoutPill(.closed, animated: false)
     }
 
-    /// Whether the pill is drawn at all in a state. Real housing: always
-    /// (closed is black-on-black). Virtual: only once it has something to say.
-    private func pillVisible(_ s: IslandState) -> Bool { !(synthetic && s == .closed) }
+    /// On a screen without a housing the island rests as a small pill at the
+    /// top-centre (over the empty middle of the menu bar) and grows from it;
+    /// open and expanded use the full MacBook-sized width so the hints fit.
+    /// Alcove's resting pill is about 2.6× as wide as it is tall.
+    private var virtualPillWidth: CGFloat { max(56, safeAreaTop * 2.6 - Island.overhang(.closed) * 2) }
+    private func baseWidth(_ s: IslandState) -> CGFloat {
+        synthetic && (s == .closed || s == .peek) ? virtualPillWidth : cutoutWidth
+    }
+    private func pillVisible(_ s: IslandState) -> Bool { true }
 
     /// The concave fillets sell the island as part of a housing. With no
     /// housing they are chrome pretending to be hardware, so a virtual island
@@ -449,14 +455,15 @@ private final class IslandView: NSView {
     /// island rounds them more once it has grown (Alcove's proportions).
     private func cornerRadius(_ s: IslandState) -> CGFloat {
         guard synthetic else { return Island.cornerRadius(s) }
-        return switch s { case .closed: 14; case .peek: 18; case .open: 34; case .expanded: 40 }
+        // Closed is a true pill: bottom radius = half its height.
+        return switch s { case .closed: safeAreaTop / 2; case .peek: 16; case .open: 34; case .expanded: 40 }
     }
 
     /// AppKit's y axis points up, so the pill hangs from the top of the view.
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
-        let width = cutoutWidth + (Island.overhang(s) + flare(s)) * 2
+        let width = baseWidth(s) + (Island.overhang(s) + flare(s)) * 2
         let height = safeAreaTop + Island.chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -738,8 +745,8 @@ private final class IslandView: NSView {
         var sub = ""
         switch mode {
         case .dictate: symbolName = ""
-        case .instruct: symbolName = "sparkles"; text = "Describe your change"; sub = "tap again, or release, to apply"
-        case .armed: symbolName = "sparkles"; text = "Refine"; sub = "double-tap to describe a change instead"
+        case .instruct: symbolName = "sparkles"; text = "Describe the change"; sub = "tap or release to apply"
+        case .armed: symbolName = "sparkles"; text = "Refine"; sub = "double-tap to describe"
         case .working(let s, let sym): symbolName = sym; text = s
         case .done(let ok, let label): symbolName = ok ? "" : "xmark.circle.fill"; text = label
         case .notes: symbolName = ""
@@ -1187,10 +1194,11 @@ private func screenMetrics(of screen: NSScreen) -> ScreenMetrics {
             synthetic: false
         )
     }
-    // Menu bar height, or a housing-like 24 when the bar is hidden.
+    // Just shy of the menu bar's height (Alcove's pill stops a hair above
+    // its bottom edge), or a housing-like 24 when the bar is hidden.
     let menuBar = screen.frame.maxY - screen.visibleFrame.maxY
     return ScreenMetrics(
-        safeAreaTop: menuBar > 0 ? menuBar : 24,
+        safeAreaTop: menuBar > 0 ? max(menuBar - 2, 20) : 24,
         cutoutWidth: 180,
         synthetic: true
     )
