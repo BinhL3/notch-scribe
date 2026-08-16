@@ -77,6 +77,19 @@ impl From<LogLevel> for tauri_plugin_log::LogLevel {
     }
 }
 
+/// Alternate keys for an action are stored as bindings of their own, keyed
+/// "transcribe@2", "transcribe@3": same action, another key — so a PC
+/// keyboard and the MacBook's can each have one without rebinding. Every
+/// registration path treats them like any binding; dispatch maps them back
+/// to the base id.
+pub fn base_binding_id(id: &str) -> &str {
+    id.split('@').next().unwrap_or(id)
+}
+
+pub fn is_alternate_binding(id: &str) -> bool {
+    id.contains('@')
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct ShortcutBinding {
     pub id: String,

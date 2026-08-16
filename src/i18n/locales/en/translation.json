@@ -185,7 +185,10 @@
           "restore": "Failed to restore original shortcut",
           "set": "Failed to set shortcut: {{error}}",
           "reset": "Failed to reset shortcut to original value"
-        }
+        },
+        "addAnotherKey": "+ Add another key (for a different keyboard)",
+        "removeKey": "Remove this key",
+        "clickToSet": "Click to set"
       },
       "language": {
         "title": "Language",

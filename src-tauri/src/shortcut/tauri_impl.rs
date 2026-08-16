@@ -15,23 +15,24 @@ use super::handler::handle_shortcut_event;
 
 /// Initialize shortcuts using Tauri's global-shortcut plugin
 pub fn init_shortcuts(app: &AppHandle) {
-    let default_bindings = settings::get_default_settings().bindings;
+    // The user's bindings (defaults already merged in by settings), so
+    // alternates ("transcribe@2") register too.
     let user_settings = settings::load_or_create_app_settings(app);
 
     // Register all default shortcuts, applying user customizations
-    for (id, default_binding) in default_bindings {
+    for (id, binding) in user_settings.bindings.clone() {
         if id == "cancel" {
             continue; // Skip cancel shortcut, it will be registered dynamically
         }
         // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !user_settings.post_process_enabled {
+        if crate::settings::base_binding_id(&id) == "transcribe_with_post_process"
+            && !user_settings.post_process_enabled
+        {
             continue;
         }
-        let binding = user_settings
-            .bindings
-            .get(&id)
-            .cloned()
-            .unwrap_or(default_binding);
+        if binding.current_binding.is_empty() {
+            continue; // an alternate with no key yet
+        }
         if let Some(owner) = super::shadowed_by(&id, &binding, &user_settings.bindings) {
             warn!(
                 "Not registering '{}': its key '{}' belongs to '{}'",

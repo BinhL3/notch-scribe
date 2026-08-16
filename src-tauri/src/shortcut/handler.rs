@@ -33,6 +33,8 @@ pub fn handle_shortcut_event(
     is_pressed: bool,
 ) {
     let settings = get_settings(app);
+    // An alternate key ("transcribe@2") is the same action as its base.
+    let binding_id = crate::settings::base_binding_id(binding_id);
 
     // Transcribe bindings are handled by the coordinator.
     if is_transcribe_binding(binding_id) {

@@ -75,7 +75,7 @@ pub fn shadowed_by<'a>(
     let rank = |i: &str| {
         BINDING_PRIORITY
             .iter()
-            .position(|p| *p == i)
+            .position(|p| *p == settings::base_binding_id(i))
             .unwrap_or(usize::MAX)
     };
     let mine = rank(id);
@@ -201,10 +201,12 @@ pub fn change_binding(
         }
     }
 
-    // Unregister the existing binding
-    if let Err(e) = unregister_shortcut(&app, binding_to_modify.clone()) {
-        let error_msg = format!("Failed to unregister shortcut: {}", e);
-        error!("change_binding error: {}", error_msg);
+    // Unregister the existing binding (an alternate may not have one yet)
+    if !binding_to_modify.current_binding.is_empty() {
+        if let Err(e) = unregister_shortcut(&app, binding_to_modify.clone()) {
+            let error_msg = format!("Failed to unregister shortcut: {}", e);
+            error!("change_binding error: {}", error_msg);
+        }
     }
 
     // Validate the new shortcut for the current keyboard implementation
@@ -249,6 +251,9 @@ pub fn change_binding(
 /// Best-effort re-register of the previous binding after a failed change,
 /// so a failure leaves the user's shortcut working exactly as before.
 fn restore_registration(app: &AppHandle, binding: &ShortcutBinding) {
+    if binding.current_binding.is_empty() {
+        return;
+    }
     if let Err(e) = register_shortcut(app, binding.clone()) {
         error!(
             "Failed to restore previous binding '{}' ({}): {}",
@@ -260,8 +265,65 @@ fn restore_registration(app: &AppHandle, binding: &ShortcutBinding) {
 #[tauri::command]
 #[specta::specta]
 pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, String> {
+    if settings::is_alternate_binding(&id) {
+        return remove_alternate_binding(app, id);
+    }
     let binding = settings::get_stored_binding(&app, &id);
     change_binding(app, id, binding.default_binding)
+}
+
+/// Add another key for an action: a new binding "<id>@n" with no key yet.
+/// The UI records into it exactly like any binding; empty bindings are
+/// never registered.
+#[tauri::command]
+#[specta::specta]
+pub fn add_alternate_binding(app: AppHandle, id: String) -> Result<BindingResponse, String> {
+    let mut settings = settings::get_settings(&app);
+    let base_id = settings::base_binding_id(&id).to_string();
+    let Some(base) = settings.bindings.get(&base_id).cloned() else {
+        return Err(format!("Binding '{base_id}' not found"));
+    };
+    let n = (2..)
+        .find(|n| !settings.bindings.contains_key(&format!("{base_id}@{n}")))
+        .unwrap_or(2);
+    let new_id = format!("{base_id}@{n}");
+    let alt = ShortcutBinding {
+        id: new_id.clone(),
+        name: format!("{} · another key", base.name),
+        description: base.description.clone(),
+        default_binding: String::new(),
+        current_binding: String::new(),
+    };
+    settings.bindings.insert(new_id, alt.clone());
+    settings::write_settings(&app, settings);
+    Ok(BindingResponse {
+        success: true,
+        binding: Some(alt),
+        error: None,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn remove_alternate_binding(app: AppHandle, id: String) -> Result<BindingResponse, String> {
+    if !settings::is_alternate_binding(&id) {
+        return Err("Only alternate keys can be removed".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    if let Some(binding) = settings.bindings.remove(&id) {
+        if !binding.current_binding.is_empty() {
+            if let Err(e) = unregister_shortcut(&app, binding) {
+                warn!("remove_alternate_binding: could not unregister '{id}': {e}");
+            }
+        }
+    }
+    settings::write_settings(&app, settings);
+    crate::secure_input::reconcile_fallback(&app);
+    Ok(BindingResponse {
+        success: true,
+        binding: None,
+        error: None,
+    })
 }
 
 /// Unregister every binding while the user is recording a new shortcut in
@@ -291,7 +353,12 @@ pub fn resume_all_shortcuts(app: &AppHandle) {
         if id == "cancel" {
             continue;
         }
-        if id == "transcribe_with_post_process" && !settings.post_process_enabled {
+        if settings::base_binding_id(id) == "transcribe_with_post_process"
+            && !settings.post_process_enabled
+        {
+            continue;
+        }
+        if binding.current_binding.is_empty() {
             continue;
         }
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -476,22 +543,32 @@ fn register_all_shortcuts_for_implementation(
     let default_bindings = settings::get_default_settings().bindings;
     let mut current_settings = settings::get_settings(app);
 
-    for (id, default_binding) in &default_bindings {
+    // User bindings, not defaults: get_settings has already merged in any
+    // missing defaults, and the user's alternates ("transcribe@2") only
+    // exist here.
+    let user_bindings = current_settings.bindings.clone();
+    for (id, binding) in &user_bindings {
         // Skip cancel shortcut as it's dynamically registered
         if id == "cancel" {
             continue;
         }
 
         // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
+        if settings::base_binding_id(id) == "transcribe_with_post_process"
+            && !current_settings.post_process_enabled
+        {
+            continue;
+        }
+        // An alternate that was added but never given a key.
+        if binding.current_binding.is_empty() {
             continue;
         }
 
-        let mut binding = current_settings
-            .bindings
-            .get(id)
+        let mut binding = binding.clone();
+        let default_binding = default_bindings
+            .get(settings::base_binding_id(id))
             .cloned()
-            .unwrap_or_else(|| default_binding.clone());
+            .unwrap_or_else(|| binding.clone());
         if let Some(owner) = shadowed_by(id, &binding, &current_settings.bindings) {
             warn!(
                 "Not registering '{}': its key '{}' belongs to '{}'",

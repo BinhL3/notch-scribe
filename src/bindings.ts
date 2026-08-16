@@ -21,6 +21,22 @@ async resetBinding(id: string) : Promise<Result<BindingResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async addAlternateBinding(id: string) : Promise<Result<BindingResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_alternate_binding", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeAlternateBinding(id: string) : Promise<Result<BindingResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_alternate_binding", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changePttSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_ptt_setting", { enabled }) };
