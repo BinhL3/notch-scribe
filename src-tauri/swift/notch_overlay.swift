@@ -77,6 +77,9 @@ private enum Island {
     /// nearly critically damped — a bounce on the way shut looks indecisive.
     static let growDuration: CFTimeInterval = 0.55
     static let growBounce: CGFloat = 0.15
+    /// Expanding to a card is the big move; it gets a visibly springy landing.
+    static let expandDuration: CFTimeInterval = 0.6
+    static let expandBounce: CGFloat = 0.28
     static let shrinkDuration: CFTimeInterval = 0.5
     /// A hint of bounce on the way shut — enough that the collapse reads as
     /// the island settling into the housing, not enough to look indecisive.
@@ -215,6 +218,21 @@ private final class IslandView: NSView {
     private let shadowLayer = CALayer()
     /// Hairline light along the pill's edge, drawn above the contents.
     private let rim = CAShapeLayer()
+    /// Now Playing at rest: a tiny artwork left of the housing and four
+    /// dancing bars right of it (Alcove / iPhone island). Only while closed
+    /// or peeking with media available and nothing being recorded.
+    private let miniArt = CALayer()
+    private let miniBars: [CAShapeLayer] = (0..<4).map { _ in CAShapeLayer() }
+    private var mediaAvailable = false
+    private var mediaPlaying = false
+    private var barsAccent: CGColor = NSColor.white.cgColor
+    private static let miniSize: CGFloat = 16
+    private static let miniPad: CGFloat = 12
+    /// Extra pill width per side while the media pill shows.
+    private var mediaExtra: CGFloat { Self.miniSize + Self.miniPad * 2 - Island.overhang(.closed) }
+    private func mediaPill(_ s: IslandState) -> Bool {
+        mediaAvailable && (s == .closed || s == .peek) && !yielding
+    }
     /// Clips everything inside the pill to the island outline, and rides
     /// the same spring, so content is revealed BY the shape opening — it
     /// cannot be seen where the island has not yet grown. Without this the
@@ -475,9 +493,79 @@ private final class IslandView: NSView {
 
         // Above the contents so the hairline is never painted over.
         pill.addSublayer(rim)
+
+        miniArt.cornerRadius = 4
+        miniArt.masksToBounds = true
+        miniArt.contentsGravity = .resizeAspectFill
+        miniArt.opacity = 0
+        miniArt.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        pill.addSublayer(miniArt)
+        for bar in miniBars {
+            bar.fillColor = barsAccent
+            bar.opacity = 0
+            pill.addSublayer(bar)
+        }
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// Rust/SwiftUI tell us what is playing; the resting pill grows around
+    /// the housing to show it, and shrinks back when it stops.
+    func setMedia(available: Bool, playing: Bool, artwork: NSImage?, accent: NSColor) {
+        let wasPill = mediaPill(state)
+        mediaAvailable = available
+        mediaPlaying = playing
+        barsAccent = accent.cgColor
+        if let artwork, let cg = artwork.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            miniArt.contents = cg
+        } else if !available {
+            miniArt.contents = nil
+        }
+        for bar in miniBars { bar.fillColor = barsAccent }
+        if mediaPill(state) != wasPill {
+            layoutPill(state, animated: true)
+        } else {
+            layoutMini(state)
+        }
+    }
+
+    /// Place and animate the mini artwork + bars for a state.
+    private func layoutMini(_ s: IslandState) {
+        let show = mediaPill(s)
+        let f = pillFrame(s)
+        // Pill-local coordinates: origin at bottom-centre of the pill layer's
+        // bounds (islandBounds), y up.
+        let h = housing(s) + chinHeight(s)
+        let midY = h - topInset(s) - (h - topInset(s)) / 2
+        let art = Self.miniSize
+        let leftX = -f.width / 2 + Self.miniPad + flare(s)
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.25)
+        miniArt.frame = CGRect(x: leftX, y: midY - art / 2, width: art, height: art)
+        miniArt.opacity = show ? 1 : 0
+        let barW: CGFloat = 2.5, gap: CGFloat = 2.5
+        let barsW = barW * 4 + gap * 3
+        let rightX = f.width / 2 - Self.miniPad - flare(s) - barsW
+        for (i, bar) in miniBars.enumerated() {
+            let x = rightX + CGFloat(i) * (barW + gap)
+            let hgt: CGFloat = mediaPlaying ? [10, 6, 12, 8][i] : 3
+            bar.frame = CGRect(x: x, y: midY - hgt / 2, width: barW, height: hgt)
+            bar.path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: barW, height: hgt), cornerWidth: barW / 2, cornerHeight: barW / 2, transform: nil)
+            bar.opacity = show ? 1 : 0
+            bar.removeAnimation(forKey: "dance")
+            if show && mediaPlaying {
+                let a = CABasicAnimation(keyPath: "transform.scale.y")
+                a.fromValue = 1
+                a.toValue = [0.45, 1.6, 0.5, 1.4][i]
+                a.duration = 0.42 + Double(i) * 0.07
+                a.autoreverses = true
+                a.repeatCount = .infinity
+                a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                bar.add(a, forKey: "dance")
+            }
+        }
+        CATransaction.commit()
+    }
 
     func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat, synthetic: Bool, scale: CGFloat) {
         self.cutoutWidth = cutoutWidth
@@ -520,7 +608,12 @@ private final class IslandView: NSView {
         synthetic && (s == .open || s == .expanded) ? 12 : safeAreaTop
     }
     private func cornerRadius(_ s: IslandState) -> CGFloat {
-        guard synthetic else { return Island.cornerRadius(s) }
+        guard synthetic else {
+            // The media pill wraps the housing like the iPhone island: full
+            // round ends.
+            if mediaPill(s) { return (housing(s) + chinHeight(s)) / 2 }
+            return Island.cornerRadius(s)
+        }
         return switch s {
         // Resting states are stadiums: radius = half the visible height.
         case .closed, .peek: (housing(s) + chinHeight(s) - topInset(s)) / 2
@@ -533,7 +626,7 @@ private final class IslandView: NSView {
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
-        let width = baseWidth(s) + (Island.overhang(s) + flare(s)) * 2
+        let width = baseWidth(s) + (Island.overhang(s) + flare(s) + (mediaPill(s) ? mediaExtra : 0)) * 2
         let height = housing(s) + chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -569,29 +662,59 @@ private final class IslandView: NSView {
 
     private func layoutNotesHost(for s: IslandState, animated: Bool) {
         guard let host = notesHost else { return }
+        host.wantsLayer = true
         if s == .expanded {
             host.frame = chinRect(.expanded)
             host.isHidden = false
+            guard let layer = host.layer else { host.alphaValue = 1; return }
+            // Scale from the top edge, where the island grows from.
+            layer.anchorPoint = CGPoint(x: 0.5, y: 1)
+            layer.position = CGPoint(x: host.frame.midX, y: host.frame.maxY)
             if animated {
-                // After the shape has mostly grown.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.25
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        host.animator().alphaValue = 1
-                    }
+                // The card is revealed by the shape opening: it starts a beat
+                // later, slightly small and soft, and springs to place while
+                // the island is still settling — never a flat fade.
+                layer.opacity = 0
+                layer.transform = CATransform3DMakeScale(0.9, 0.9, 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                    guard let self, self.state == .expanded else { return }
+                    let scale = springAnimation(keyPath: "transform", duration: 0.5, bounce: 0.2)
+                    scale.fromValue = layer.presentation()?.transform ?? layer.transform
+                    scale.toValue = CATransform3DIdentity
+                    let fade = CABasicAnimation(keyPath: "opacity")
+                    fade.fromValue = layer.presentation()?.opacity ?? 0
+                    fade.toValue = 1
+                    fade.duration = 0.28
+                    fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    layer.transform = CATransform3DIdentity
+                    layer.opacity = 1
+                    layer.add(scale, forKey: "transform")
+                    layer.add(fade, forKey: "opacity")
                 }
             } else {
-                host.alphaValue = 1
+                layer.transform = CATransform3DIdentity
+                layer.opacity = 1
             }
         } else if !host.isHidden {
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.15
-                host.animator().alphaValue = 0
-            }, completionHandler: { [weak self] in
+            guard let layer = host.layer else { host.isHidden = true; return }
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = layer.presentation()?.opacity ?? 1
+            fade.toValue = 0
+            fade.duration = 0.16
+            fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            let shrink = CABasicAnimation(keyPath: "transform")
+            shrink.fromValue = layer.presentation()?.transform ?? layer.transform
+            shrink.toValue = CATransform3DMakeScale(0.94, 0.94, 1)
+            shrink.duration = 0.16
+            shrink.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            layer.opacity = 0
+            layer.transform = CATransform3DMakeScale(0.94, 0.94, 1)
+            layer.add(fade, forKey: "opacity")
+            layer.add(shrink, forKey: "transform")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.17) { [weak self] in
                 guard let self, self.state != .expanded else { return }
                 host.isHidden = true
-            })
+            }
         }
     }
 
@@ -628,8 +751,9 @@ private final class IslandView: NSView {
             return
         }
 
-        let duration = growing ? Island.growDuration : Island.shrinkDuration
-        let bounce = growing ? Island.growBounce : Island.shrinkBounce
+        let toCard = s == .expanded
+        let duration = toCard ? Island.expandDuration : growing ? Island.growDuration : Island.shrinkDuration
+        let bounce = toCard ? Island.expandBounce : growing ? Island.growBounce : Island.shrinkBounce
 
         // One spring for bounds, one for the outline; nothing has a position
         // to animate. Bounds and path must share the identical spring, or the
@@ -705,6 +829,7 @@ private final class IslandView: NSView {
     /// housing occupies the top `safeAreaTop` points.
     private func layoutContents(_ s: IslandState) {
         let open = s == .open
+        layoutMini(s)
 
         // The key line separates black island from black housing; a virtual
         // island has no housing to separate from, and reads as an outline.
@@ -1578,6 +1703,8 @@ private final class IslandController {
     func setNowPlaying(json: String) {
         guard let (_, view) = ensurePanel() else { return }
         view.mediaModel.load(json: json)
+        let m = view.mediaModel
+        view.setMedia(available: m.available, playing: m.playing, artwork: m.artwork, accent: NSColor(m.accent))
         // Media went away while the player was showing: fall back to notes.
         if expanded, view.expandedTab.tab == .player, !view.mediaModel.available {
             view.expandedTab.tab = .notes
@@ -2139,16 +2266,16 @@ struct ExpandedView: View {
             Group {
                 if tab.tab == .player && media.available {
                     NowPlayingView(model: media)
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 } else {
                     NotesListView(model: notes)
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
             }
             // The other card, one quiet glyph away. Only when there is one.
             if media.available {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         tab.tab = tab.tab == .player ? .notes : .player
                     }
                 } label: {
