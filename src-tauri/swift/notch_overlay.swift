@@ -1676,12 +1676,14 @@ private final class IslandController {
 //
 // Rust calls these from arbitrary threads; AppKit requires the main thread.
 
+/// Pure (an OS-version check) and callable from any thread. It must NOT
+/// hop to the main thread: Rust caches the answer in a OnceLock, and a
+/// background caller holding that lock while waiting on a busy main thread
+/// deadlocked startup once the main thread asked too.
 @_cdecl("notch_overlay_available")
 public func notch_overlay_available() -> Int32 {
-    if Thread.isMainThread {
-        return IslandController.shared.available() ? 1 : 0
-    }
-    return DispatchQueue.main.sync { IslandController.shared.available() ? 1 : 0 }
+    if #available(macOS 12.0, *) { return 1 }
+    return 0
 }
 
 /// Put the island on screen at rest so hover works before the first

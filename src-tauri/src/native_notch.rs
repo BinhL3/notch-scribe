@@ -29,8 +29,8 @@ unsafe extern "C" {
 }
 
 /// Whether the native island can run at all (macOS 12+; it is virtual on
-/// screens without a housing and follows the working screen). Cached: it
-/// requires a main-thread hop and cannot change at runtime.
+/// screens without a housing and follows the working screen). Pure on the
+/// Swift side — no main-thread hop — so it is safe from any thread.
 pub fn is_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
