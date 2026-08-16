@@ -56,7 +56,7 @@ export const ShortcutInput: React.FC<ShortcutInputProps> = (props) => {
         <div className="px-4 pb-2 -mt-1 flex justify-end">
           <button
             type="button"
-            className="text-xs text-mid-gray hover:text-logo-primary cursor-pointer"
+            className="px-1.5 py-0.5 rounded-md text-xs text-mid-gray hover:text-logo-primary hover:bg-logo-primary/10 transition-colors cursor-pointer"
             onClick={addAlternate}
           >
             {t("settings.general.shortcut.addAnotherKey")}

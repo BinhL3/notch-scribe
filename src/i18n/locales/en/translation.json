@@ -186,7 +186,7 @@
           "set": "Failed to set shortcut: {{error}}",
           "reset": "Failed to reset shortcut to original value"
         },
-        "addAnotherKey": "+ Add another key (for a different keyboard)",
+        "addAnotherKey": "+ Another key",
         "removeKey": "Remove this key",
         "clickToSet": "Click to set"
       },
@@ -234,7 +234,7 @@
         "placeholder": "Select microphone...",
         "loading": "Loading...",
         "then": "then",
-        "addFallback": "+ add fallback",
+        "addFallback": "+ Fallback",
         "systemDefault": "then system default",
         "notConnected": "Not connected right now"
       },

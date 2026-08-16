@@ -1,9 +1,62 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Dropdown } from "../ui/Dropdown";
 import { SettingContainer } from "../ui/SettingContainer";
 import { ResetButton } from "../ui/ResetButton";
 import { useSettings } from "../../hooks/useSettings";
+
+/// A quiet "+" that opens the same menu the Dropdown uses — no native
+/// <select>, which would look foreign in the glass window.
+const AddMenu: React.FC<{
+  label: string;
+  options: { value: string; label: string }[];
+  disabled?: boolean;
+  onPick: (value: string) => void;
+}> = ({ label, options, disabled, onPick }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        disabled={disabled}
+        className={`px-1.5 py-0.5 rounded-md text-xs transition-colors ${
+          disabled
+            ? "opacity-50 cursor-not-allowed"
+            : "text-logo-primary hover:bg-logo-primary/10 cursor-pointer"
+        }`}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {label}
+      </button>
+      {open && (
+        <div className="absolute top-full right-0 mt-1 min-w-[200px] bg-background border border-mid-gray/80 rounded-md shadow-lg z-50 max-h-60 overflow-y-auto">
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              className="w-full px-2 py-1 text-sm text-start hover:bg-logo-primary/10 transition-colors duration-150"
+              onClick={() => {
+                onPick(o.value);
+                setOpen(false);
+              }}
+            >
+              <span className="whitespace-normal break-words">{o.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 interface MicrophoneSelectorProps {
   descriptionMode?: "inline" | "tooltip";
@@ -85,7 +138,7 @@ export const MicrophoneSelector: React.FC<MicrophoneSelectorProps> = React.memo(
               {fallbacks.map((name) => (
                 <span
                   key={name}
-                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-mid-gray/10 border border-mid-gray/40 ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-mid-gray/10 text-text/80 ${
                     connected.has(name) ? "" : "opacity-60"
                   }`}
                   title={connected.has(name) ? undefined : t("settings.sound.microphone.notConnected")}
@@ -93,7 +146,7 @@ export const MicrophoneSelector: React.FC<MicrophoneSelectorProps> = React.memo(
                   {name}
                   <button
                     type="button"
-                    className="hover:text-text cursor-pointer"
+                    className="text-text/50 hover:text-text cursor-pointer leading-none"
                     aria-label="Remove"
                     disabled={busy}
                     onClick={() => setPriority(priority.filter((n) => n !== name))}
@@ -103,19 +156,12 @@ export const MicrophoneSelector: React.FC<MicrophoneSelectorProps> = React.memo(
                 </span>
               ))}
               {addOptions.length > 0 ? (
-                <select
-                  className="bg-transparent text-xs text-logo-primary cursor-pointer outline-none"
-                  value=""
+                <AddMenu
+                  label={t("settings.sound.microphone.addFallback")}
+                  options={addOptions}
                   disabled={busy}
-                  onChange={(e) => e.target.value && setPriority([...priority, e.target.value])}
-                >
-                  <option value="">{t("settings.sound.microphone.addFallback")}</option>
-                  {addOptions.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+                  onPick={(name) => setPriority([...priority, name])}
+                />
               ) : (
                 <span>{t("settings.sound.microphone.systemDefault")}</span>
               )}
