@@ -226,8 +226,11 @@ private final class IslandView: NSView {
     private var mediaAvailable = false
     private var mediaPlaying = false
     private var barsAccent: CGColor = NSColor.white.cgColor
-    private static let miniSize: CGFloat = 16
-    private static let miniPad: CGFloat = 12
+    private static let miniSize: CGFloat = 14
+    private static let miniPad: CGFloat = 7
+    /// Whether the bars are currently animating (avoid restarting them on
+    /// every update — a restart snaps the phase and shifts pixels).
+    private var barsDancing = false
     /// Extra pill width per side while the media pill shows.
     private var mediaExtra: CGFloat { Self.miniSize + Self.miniPad * 2 - Island.overhang(.closed) }
     private func mediaPill(_ s: IslandState) -> Bool {
@@ -538,32 +541,45 @@ private final class IslandView: NSView {
         let h = housing(s) + chinHeight(s)
         let midY = h - topInset(s) - (h - topInset(s)) / 2
         let art = Self.miniSize
-        let leftX = -f.width / 2 + Self.miniPad + flare(s)
+        let leftX = (-f.width / 2 + Self.miniPad + flare(s)).rounded()
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.25)
-        miniArt.frame = CGRect(x: leftX, y: midY - art / 2, width: art, height: art)
+        miniArt.frame = CGRect(x: leftX, y: (midY - art / 2).rounded(), width: art, height: art)
         miniArt.opacity = show ? 1 : 0
-        let barW: CGFloat = 2.5, gap: CGFloat = 2.5
+        let barW: CGFloat = 2.5, gap: CGFloat = 2.5, maxH: CGFloat = 12
         let barsW = barW * 4 + gap * 3
-        let rightX = f.width / 2 - Self.miniPad - flare(s) - barsW
+        let rightX = (f.width / 2 - Self.miniPad - flare(s) - barsW).rounded()
+        let dance = show && mediaPlaying
         for (i, bar) in miniBars.enumerated() {
             let x = rightX + CGFloat(i) * (barW + gap)
-            let hgt: CGFloat = mediaPlaying ? [10, 6, 12, 8][i] : 3
-            bar.frame = CGRect(x: x, y: midY - hgt / 2, width: barW, height: hgt)
-            bar.path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: barW, height: hgt), cornerWidth: barW / 2, cornerHeight: barW / 2, transform: nil)
+            // Fixed geometry (a full-height bar), pixel-aligned; only the
+            // scale changes, so nothing re-rasterises or shifts.
+            if bar.path == nil {
+                bar.bounds = CGRect(x: 0, y: 0, width: barW, height: maxH)
+                bar.path = CGPath(roundedRect: bar.bounds, cornerWidth: barW / 2, cornerHeight: barW / 2, transform: nil)
+            }
+            bar.position = CGPoint(x: x + barW / 2, y: midY.rounded())
             bar.opacity = show ? 1 : 0
-            bar.removeAnimation(forKey: "dance")
-            if show && mediaPlaying {
-                let a = CABasicAnimation(keyPath: "transform.scale.y")
-                a.fromValue = 1
-                a.toValue = [0.45, 1.6, 0.5, 1.4][i]
-                a.duration = 0.42 + Double(i) * 0.07
-                a.autoreverses = true
-                a.repeatCount = .infinity
-                a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                bar.add(a, forKey: "dance")
+            let rest: CGFloat = 3 / maxH
+            if dance {
+                if !barsDancing {
+                    let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
+                    let peaks: [[CGFloat]] = [[0.35, 0.9, 0.5, 0.75], [1.0, 0.45, 0.8, 0.6], [0.5, 0.95, 0.4, 0.85], [0.7, 0.4, 0.9, 0.55]]
+                    a.values = peaks[i] + [peaks[i][0]]
+                    a.duration = 0.9 + Double(i) * 0.13
+                    a.repeatCount = .infinity
+                    a.calculationMode = .cubic
+                    a.beginTime = CACurrentMediaTime() + Double(i) * 0.05
+                    a.fillMode = .backwards
+                    bar.transform = CATransform3DMakeScale(1, peaks[i][0], 1)
+                    bar.add(a, forKey: "dance")
+                }
+            } else {
+                bar.removeAnimation(forKey: "dance")
+                bar.transform = CATransform3DMakeScale(1, rest, 1)
             }
         }
+        barsDancing = dance
         CATransaction.commit()
     }
 
@@ -1679,7 +1695,8 @@ private final class IslandController {
         panel.ignoresMouseEvents = false
         view.expandedTab.tab = view.mediaModel.playing ? .player : .notes
         view.expandedTab.onChange = { [weak self] in self?.relayoutExpanded() }
-        view.expandedChin = expandedChinHeight(for: view.expandedTab.tab)
+        view.notesModel.onCountChange = { [weak self] in self?.relayoutExpanded() }
+        view.expandedChin = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
         view.setMode(.notes)
         view.layoutPill(.expanded, animated: true)
     }
@@ -1698,6 +1715,7 @@ private final class IslandController {
     func setNotes(json: String) {
         guard let (_, view) = ensurePanel() else { return }
         view.notesModel.load(json: json)
+        relayoutExpanded()
     }
 
     func setNowPlaying(json: String) {
@@ -1715,7 +1733,7 @@ private final class IslandController {
     /// The card decides the expanded height; re-spring when it changes.
     func relayoutExpanded() {
         guard let view, expanded else { return }
-        let h = expandedChinHeight(for: view.expandedTab.tab)
+        let h = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
         guard h != view.expandedChin else { return }
         view.expandedChin = h
         view.layoutPill(.expanded, animated: true)
@@ -1948,6 +1966,8 @@ final class NotesModel: ObservableObject {
 
     /// Done means gone: the island is an inbox. Rust records `done_at`; the
     /// full list stays in Settings.
+    /// Island re-measures the expanded height when the list changes.
+    var onCountChange: (() -> Void)?
     func clear(_ n: NoteItem) {
         guard !clearing.contains(n.id) else { return }
         clearing.insert(n.id)
@@ -1959,6 +1979,7 @@ final class NotesModel: ObservableObject {
             }
             self.clearing.remove(n.id)
             noteActionCallback?(1, n.id)
+            self.onCountChange?()
         }
     }
 
@@ -2040,7 +2061,7 @@ struct NotesListView: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.bottom, 10)
+        .padding(.bottom, 4)
         .transition(.opacity)
     }
 
@@ -2132,9 +2153,16 @@ struct NotesListView: View {
 
 enum ExpandedCard { case player, notes }
 
-/// Chin height per card: the player is a compact block, the inbox a list.
-private func expandedChinHeight(for tab: ExpandedCard) -> CGFloat {
-    switch tab { case .player: 196; case .notes: Island.chinHeight(.expanded) }
+/// Chin height per card: the player is a compact block; the inbox is as tall
+/// as it needs to be (empty state is small), capped.
+private func expandedChinHeight(for tab: ExpandedCard, noteCount: Int) -> CGFloat {
+    switch tab {
+    case .player: return 164
+    case .notes:
+        if noteCount == 0 { return 132 }
+        let rows = CGFloat(min(noteCount, 5))
+        return min(Island.chinHeight(.expanded), 44 + rows * 52 + 8)
+    }
 }
 
 /// Which card is showing. A tiny observable so the SwiftUI switch and the
@@ -2303,12 +2331,12 @@ struct NowPlayingView: View {
     @State private var volume: Float = SystemVolume.get()
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
+        VStack(spacing: 7) {
+            HStack(spacing: 10) {
                 artwork
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                     Text(model.artist.isEmpty ? model.album : model.artist)
                         .font(.system(size: 12))
@@ -2321,18 +2349,17 @@ struct NowPlayingView: View {
                     .padding(.trailing, 30) // room for the card switch
             }
             timeline
-            HStack(spacing: 34) {
-                transport("backward.fill", size: 18) { mediaActionCallback?(3, 0) }
-                transport(model.playing ? "pause.fill" : "play.fill", size: 26) { mediaActionCallback?(1, 0) }
-                transport("forward.fill", size: 18) { mediaActionCallback?(2, 0) }
+            HStack(spacing: 30) {
+                transport("backward.fill", size: 16) { mediaActionCallback?(3, 0) }
+                transport(model.playing ? "pause.fill" : "play.fill", size: 22) { mediaActionCallback?(1, 0) }
+                transport("forward.fill", size: 16) { mediaActionCallback?(2, 0) }
             }
             .frame(maxWidth: .infinity)
-            .padding(.top, 2)
             volumeRow
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
     }
 
     private var artwork: some View {
@@ -2346,8 +2373,8 @@ struct NowPlayingView: View {
                 }
             }
         }
-        .frame(width: 46, height: 46)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(width: 40, height: 40)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var timeline: some View {
@@ -2416,7 +2443,7 @@ struct NowPlayingView: View {
             Image(systemName: name)
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(.white)
-                .frame(width: 40, height: 34)
+                .frame(width: 36, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
