@@ -229,8 +229,8 @@ private final class IslandView: NSView {
     private var mediaAvailable = false
     private var mediaPlaying = false
     private var barsAccent: CGColor = NSColor.white.cgColor
-    private static let miniSize: CGFloat = 14
-    private static let miniPad: CGFloat = 7
+    private static let miniSize: CGFloat = 20
+    private static let miniPad: CGFloat = 6
     /// Whether the bars are currently animating (avoid restarting them on
     /// every update — a restart snaps the phase and shifts pixels).
     private var barsDancing = false
@@ -368,6 +368,7 @@ private final class IslandView: NSView {
     /// The expanded chin depends on what it shows: the player card is
     /// shorter than the notes list. Set before layoutPill(.expanded).
     var expandedChin: CGFloat = Island.chinHeight(.expanded)
+    var expandedOverhang: CGFloat = Island.overhang(.expanded)
     private func chinHeight(_ s: IslandState) -> CGFloat {
         s == .expanded ? expandedChin : Island.chinHeight(s)
     }
@@ -500,7 +501,7 @@ private final class IslandView: NSView {
         // Above the contents so the hairline is never painted over.
         pill.addSublayer(rim)
 
-        miniArt.cornerRadius = 4
+        miniArt.cornerRadius = 5
         miniArt.masksToBounds = true
         miniArt.contentsGravity = .resizeAspectFill
         miniArt.opacity = 0
@@ -543,7 +544,9 @@ private final class IslandView: NSView {
         // bounds (islandBounds), y up.
         let h = housing(s) + chinHeight(s)
         let midY = h - topInset(s) - (h - topInset(s)) / 2
-        let art = Self.miniSize
+        // As tall as the pill allows (the iPhone island fills its ends),
+        // capped at miniSize so it never dominates a big virtual pill.
+        let art = max(12, min(Self.miniSize, h - topInset(s) - 8))
         let leftX = (-f.width / 2 + Self.miniPad + flare(s)).rounded()
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.25)
@@ -645,7 +648,8 @@ private final class IslandView: NSView {
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
-        let width = baseWidth(s) + (Island.overhang(s) + flare(s) + (mediaPill(s) ? mediaExtra : 0)) * 2
+        let over = s == .expanded ? expandedOverhang : Island.overhang(s)
+        let width = baseWidth(s) + (over + flare(s) + (mediaPill(s) ? mediaExtra : 0)) * 2
         let height = housing(s) + chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -1456,16 +1460,23 @@ private func otherNotchAppRunning() -> Bool {
     }
 }
 
-/// The screen the user is working on: where the frontmost app's focused
-/// window is (that is where dictation lands), else under the pointer, else
-/// the notched one, else the first. `NSScreen.main` is wrong here — it is
-/// *our* key window's screen, and we have none.
-private func workingScreen() -> NSScreen? {
-    if let s = focusedWindowScreen() { return s }
+/// The screen to use *right now*, from cheap signals only: the pointer,
+/// else the notched display, else the first. Must stay non-blocking — it
+/// runs on the main thread on every show().
+private func quickScreen() -> NSScreen? {
     let mouse = NSEvent.mouseLocation
     if let s = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) { return s }
     if let s = NSScreen.screens.first(where: { !screenMetrics(of: $0).synthetic }) { return s }
     return NSScreen.screens.first
+}
+
+/// The screen the user is working on: where the frontmost app's focused
+/// window is (that is where dictation lands). The AX query can block on a
+/// busy app, so it is only ever called off the main thread; callers show on
+/// quickScreen() immediately and re-place if this disagrees.
+private func workingScreen() -> NSScreen? {
+    if let s = focusedWindowScreen() { return s }
+    return quickScreen()
 }
 
 /// Screen containing the frontmost app's focused window, via Accessibility
@@ -1474,6 +1485,8 @@ private func workingScreen() -> NSScreen? {
 private func focusedWindowScreen() -> NSScreen? {
     guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
     let ax = AXUIElementCreateApplication(app.processIdentifier)
+    // Cap how long an unresponsive app may hold us (default is seconds).
+    AXUIElementSetMessagingTimeout(ax, 0.1)
     var winRef: CFTypeRef?
     guard AXUIElementCopyAttributeValue(ax, kAXFocusedWindowAttribute as CFString, &winRef) == .success,
           let winRef else { return nil }
@@ -1596,6 +1609,17 @@ private final class IslandController {
         screen = target
     }
 
+    /// Find the focused window's screen off-main and re-place if it differs.
+    /// By the time the AX answer lands the island may already be open there —
+    /// follow() only acts while closed, so a late answer never yanks an open
+    /// island across displays; it corrects the next gesture instead.
+    private func refineScreenAsync() {
+        DispatchQueue.global(qos: .userInteractive).async {
+            let s = focusedWindowScreen()
+            DispatchQueue.main.async { [weak self] in self?.follow(s) }
+        }
+    }
+
     /// Move to `target` if idle. Never mid-gesture: an island that jumps
     /// screens while open is worse than one on the wrong screen.
     private func follow(_ target: NSScreen?) {
@@ -1693,10 +1717,11 @@ private final class IslandController {
 
     // MARK: Notes list
 
-    /// Open the inbox on the working screen, ignoring the yield rule.
+    /// Open the inbox on the pointer's screen (a tray click — the pointer is
+    /// where the user is), ignoring the yield rule.
     func showNotes() {
         guard let (_, view) = ensurePanel(), !recording else { return }
-        follow(workingScreen())
+        follow(quickScreen())
         if expanded { collapse(); return }
         _ = view
         expand()
@@ -1714,6 +1739,7 @@ private final class IslandController {
         view.expandedTab.onChange = { [weak self] in self?.relayoutExpanded() }
         view.notesModel.onCountChange = { [weak self] in self?.relayoutExpanded() }
         view.expandedChin = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
+        view.expandedOverhang = expandedOverhang(for: view.expandedTab.tab)
         view.setMode(.notes)
         view.layoutPill(.expanded, animated: true)
     }
@@ -1751,8 +1777,10 @@ private final class IslandController {
     func relayoutExpanded() {
         guard let view, expanded else { return }
         let h = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
-        guard h != view.expandedChin else { return }
+        let o = expandedOverhang(for: view.expandedTab.tab)
+        guard h != view.expandedChin || o != view.expandedOverhang else { return }
         view.expandedChin = h
+        view.expandedOverhang = o
         view.layoutPill(.expanded, animated: true)
     }
 
@@ -1772,8 +1800,11 @@ private final class IslandController {
     /// would restart the timer and re-run the reveal.
     func show() {
         guard let (_, view) = ensurePanel() else { return }
-        // Where the text will land is where the island should be.
-        follow(workingScreen())
+        // Show NOW on a cheaply-chosen screen; where the text actually lands
+        // (the focused window's screen, an AX query that can block) is found
+        // in the background and only moves the island if it disagrees.
+        follow(quickScreen())
+        refineScreenAsync()
         pendingPeek?.cancel()
         pendingUnpeek?.cancel()
         if expanded {
@@ -2170,11 +2201,17 @@ struct NotesListView: View {
 
 enum ExpandedCard { case player, notes }
 
+/// Horizontal reach past the cutout per card: the player is a compact
+/// Alcove-sized box, the notes list keeps the full width.
+private func expandedOverhang(for tab: ExpandedCard) -> CGFloat {
+    switch tab { case .player: return 56; case .notes: return Island.overhang(.expanded) }
+}
+
 /// Chin height per card: the player is a compact block; the inbox is as tall
 /// as it needs to be (empty state is small), capped.
 private func expandedChinHeight(for tab: ExpandedCard, noteCount: Int) -> CGFloat {
     switch tab {
-    case .player: return 164
+    case .player: return 148
     case .notes:
         if noteCount == 0 { return 132 }
         let rows = CGFloat(min(noteCount, 5))
@@ -2317,6 +2354,7 @@ struct ExpandedView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             // The other card, one quiet glyph away. Only when there is one.
             if media.available {
                 Button {
