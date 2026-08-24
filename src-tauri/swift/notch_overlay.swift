@@ -80,6 +80,9 @@ private enum Island {
     /// Expanding to a card is the big move; it gets a visibly springy landing.
     static let expandDuration: CFTimeInterval = 0.6
     static let expandBounce: CGFloat = 0.28
+    /// Peek moves a few points; on the open spring it feels like lag.
+    static let peekDuration: CFTimeInterval = 0.3
+    static let peekBounce: CGFloat = 0.25
     static let shrinkDuration: CFTimeInterval = 0.5
     /// A hint of bounce on the way shut — enough that the collapse reads as
     /// the island settling into the housing, not enough to look indecisive.
@@ -97,8 +100,8 @@ private enum Island {
     /// Hover: dwell before the peek, grace after the pointer leaves, and how
     /// far outside the pill still counts as "on it" (larger once lifted so a
     /// pointer drifting along the edge doesn't flicker it).
-    static let hoverDwell: TimeInterval = 0.3
-    static let hoverExitGrace: TimeInterval = 0.1
+    static let hoverDwell: TimeInterval = 0.12
+    static let hoverExitGrace: TimeInterval = 0.15
     static func hoverSlop(_ s: IslandState) -> CGFloat {
         switch s { case .closed: 10; case .peek, .open, .expanded: 30 }
     }
@@ -738,6 +741,8 @@ private final class IslandView: NSView {
         layoutNotesHost(for: s, animated: animated)
         let growing = chinHeight(s) > chinHeight(state)
         let leavingOpen = state == .open && s != .open
+        // Peek in/out is a small move between the resting states.
+        let peeking = (s == .peek && state == .closed) || (s == .closed && state == .peek)
         state = s
         let target = pillFrame(s)
         let targetBounds = islandBounds(target.size)
@@ -768,8 +773,12 @@ private final class IslandView: NSView {
         }
 
         let toCard = s == .expanded
-        let duration = toCard ? Island.expandDuration : growing ? Island.growDuration : Island.shrinkDuration
-        let bounce = toCard ? Island.expandBounce : growing ? Island.growBounce : Island.shrinkBounce
+        var duration = toCard ? Island.expandDuration : growing ? Island.growDuration : Island.shrinkDuration
+        var bounce = toCard ? Island.expandBounce : growing ? Island.growBounce : Island.shrinkBounce
+        if peeking {
+            duration = Island.peekDuration
+            bounce = growing ? Island.peekBounce : 0.08
+        }
 
         // One spring for bounds, one for the outline; nothing has a position
         // to animate. Bounds and path must share the identical spring, or the
@@ -1255,7 +1264,9 @@ private final class IslandView: NSView {
         // Levels can trail the stop by a few callbacks; once the mode has left
         // recording they must not fight the wave's settle.
         guard state == .open, mode.isRecording else { return }
-        let l = max(0, min(level, 1))
+        // Perceptual: raw peaks for speech sit around 0.05-0.3, which on a
+        // linear scale barely moves the wave. sqrt lifts the quiet range.
+        let l = sqrt(max(0, min(level, 1)))
         wavePowerTarget = Wave.idlePower + (1 - Wave.idlePower) * l
     }
 
@@ -1263,14 +1274,17 @@ private final class IslandView: NSView {
     /// toward their targets, re-roll targets on the interval, redraw.
     private func tickWaves() {
         let now = CACurrentMediaTime()
-        wavePower += (wavePowerTarget - wavePower) * 0.25
+        // Attack fast (speech should show the same syllable, not the next),
+        // release slower so the wave breathes down instead of collapsing.
+        let k: CGFloat = wavePowerTarget > wavePower ? 0.55 : 0.10
+        wavePower += (wavePowerTarget - wavePower) * k
         if now - lastReroll > Wave.rerollInterval {
             lastReroll = now
             for i in waveTargets.indices { waveTargets[i] = SiriWave.random(power: 1) }
         }
-        for i in waveShapes.indices { waveShapes[i].ease(toward: waveTargets[i], by: 0.18) }
+        for i in waveShapes.indices { waveShapes[i].ease(toward: waveTargets[i], by: 0.10) }
         CATransaction.begin()
-        CATransaction.setAnimationDuration(1.0 / 30.0)
+        CATransaction.setAnimationDuration(1.0 / 60.0)
         redrawWaves()
         CATransaction.commit()
         // Stop ticking once drained and idle.
@@ -1289,9 +1303,12 @@ private final class IslandView: NSView {
 
     private func startWaveTick() {
         waveTick?.invalidate()
-        waveTick = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.tickWaves()
         }
+        // .common, or the wave freezes while a menu is open or a window drags.
+        RunLoop.main.add(t, forMode: .common)
+        waveTick = t
     }
 
     /// A fresh recording starts with a still wave and 0:00, not the tail of
