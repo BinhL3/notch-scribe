@@ -5,6 +5,8 @@
 import AppKit
 import QuartzCore
 import CoreImage
+import CoreAudio
+import AudioToolbox
 import SwiftUI
 
 // MARK: - Geometry
@@ -35,6 +37,12 @@ enum IslandMode: Equatable {
     case done(ok: Bool, label: String)
     /// The notes list is showing (expanded state); the chin cluster is empty.
     case notes
+    /// The track changed: a brief banner under the housing — artwork and
+    /// bars stay in the top band, "Title · Artist" beneath (the iPhone
+    /// island's song-change moment). Auto-closes.
+    case announce(title: String, artist: String)
+
+    var isAnnounce: Bool { if case .announce = self { return true }; return false }
 
     var isDone: Bool { if case .done = self { return true }; return false }
     var isSuccess: Bool { if case .done(let ok, _) = self { return ok }; return false }
@@ -227,6 +235,20 @@ private final class IslandView: NSView {
     private var mediaAvailable = false
     private var mediaPlaying = false
     private var barsAccent: CGColor = NSColor.white.cgColor
+    /// Sound HUD: icon + "Sound" left of the housing, meter + value right.
+    /// Shown briefly when the system volume changes; wins over the media
+    /// mini while up.
+    private let hudIcon = CALayer()
+    private let hudLabel = CATextLayer()
+    private let hudTrack = CAShapeLayer()
+    private let hudFill = CAShapeLayer()
+    private let hudValue = CATextLayer()
+    private(set) var hudActive = false
+    private var hudLevel: Float = 0
+    private var hudIconName = "speaker.wave.2.fill"
+    private static let hudExtra: CGFloat = 104
+    private static let hudGreen = NSColor(red: 0.42, green: 0.83, blue: 0.6, alpha: 1)
+
     private static let miniSize: CGFloat = 20
     private static let miniPad: CGFloat = 6
     /// Whether the bars are currently animating (avoid restarting them on
@@ -235,7 +257,10 @@ private final class IslandView: NSView {
     /// Extra pill width per side while the media pill shows.
     private var mediaExtra: CGFloat { Self.miniSize + Self.miniPad * 2 - Island.overhang(.closed) }
     private func mediaPill(_ s: IslandState) -> Bool {
-        mediaAvailable && (s == .closed || s == .peek) && !yielding
+        if yielding || !mediaAvailable || hudActive { return false }
+        // The banner keeps the artwork and bars in its top band.
+        if s == .open, mode.isAnnounce { return true }
+        return s == .closed || s == .peek
     }
     /// Clips everything inside the pill to the island outline, and rides
     /// the same spring, so content is revealed BY the shape opening — it
@@ -368,7 +393,10 @@ private final class IslandView: NSView {
     var expandedChin: CGFloat = Island.chinHeight(.expanded)
     var expandedOverhang: CGFloat = Island.overhang(.expanded)
     private func chinHeight(_ s: IslandState) -> CGFloat {
-        s == .expanded ? expandedChin : Island.chinHeight(s)
+        if s == .expanded { return expandedChin }
+        // The song banner is shallower than a full open.
+        if s == .open, mode.isAnnounce { return 46 }
+        return Island.chinHeight(s)
     }
     /// No hardware housing on this screen: draw nothing at rest.
     private var synthetic = false
@@ -510,6 +538,70 @@ private final class IslandView: NSView {
             bar.opacity = 0
             pill.addSublayer(bar)
         }
+
+        hudIcon.contentsGravity = .resizeAspect
+        hudLabel.string = "Sound"
+        hudLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        hudLabel.fontSize = 13
+        hudLabel.foregroundColor = NSColor.white.cgColor
+        hudValue.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        hudValue.fontSize = 12
+        hudValue.foregroundColor = NSColor.white.withAlphaComponent(0.85).cgColor
+        hudValue.alignmentMode = .right
+        hudTrack.fillColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        hudFill.fillColor = Self.hudGreen.cgColor
+        for l in [hudIcon, hudLabel, hudTrack, hudFill, hudValue] as [CALayer] {
+            l.opacity = 0
+            pill.addSublayer(l)
+        }
+    }
+
+    /// Volume changed: widen into the Sound pill (or just move the meter if
+    /// it is already up).
+    func showHUD(level: Float, icon: String) {
+        hudLevel = level
+        hudIconName = icon
+        let was = hudActive
+        hudActive = true
+        if was { layoutHUD(state) } else { layoutPill(state, animated: true) }
+    }
+
+    func hideHUD() {
+        guard hudActive else { return }
+        hudActive = false
+        layoutPill(state, animated: true)
+    }
+
+    private func layoutHUD(_ s: IslandState) {
+        let show = hudActive && (s == .closed || s == .peek) && pillVisible(s)
+        let f = pillFrame(s)
+        let h = housing(s) + chinHeight(s)
+        let midY = (h - topInset(s)) / 2
+        let alpha: Float = show ? 1 : 0
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.2)
+        // Left cluster: icon · Sound.
+        let iconSize: CGFloat = 16
+        var x = (-f.width / 2 + 14 + flare(s)).rounded()
+        hudIcon.contents = symbolImage(hudIconName, size: 13, color: .white)
+        hudIcon.frame = CGRect(x: x, y: (midY - iconSize / 2).rounded(), width: iconSize, height: iconSize)
+        x += iconSize + 7
+        let labelH = ceil(NSFont.systemFont(ofSize: 13, weight: .semibold).ascender - NSFont.systemFont(ofSize: 13).descender)
+        hudLabel.frame = CGRect(x: x, y: (midY - labelH / 2).rounded() - 1, width: 60, height: labelH)
+        // Right cluster: meter · value.
+        let valueW: CGFloat = 26
+        let meterW: CGFloat = 46
+        let right = (f.width / 2 - 14 - flare(s)).rounded()
+        hudValue.frame = CGRect(x: right - valueW, y: (midY - 8).rounded(), width: valueW, height: 15)
+        hudValue.string = "\(Int((hudLevel * 100).rounded()))"
+        let track = CGRect(x: right - valueW - 9 - meterW, y: (midY - 2.5).rounded(), width: meterW, height: 5)
+        hudTrack.frame = track
+        hudTrack.path = CGPath(roundedRect: CGRect(origin: .zero, size: track.size), cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
+        let fillW = max(hudLevel > 0 ? 5 : 0, meterW * CGFloat(hudLevel))
+        hudFill.frame = CGRect(x: track.minX, y: track.minY, width: fillW, height: 5)
+        hudFill.path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: fillW, height: 5), cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
+        for l in [hudIcon, hudLabel, hudTrack, hudFill, hudValue] as [CALayer] { l.opacity = alpha }
+        CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -541,7 +633,10 @@ private final class IslandView: NSView {
         // Pill-local coordinates: origin at bottom-centre of the pill layer's
         // bounds (islandBounds), y up.
         let h = housing(s) + chinHeight(s)
-        let midY = h - topInset(s) - (h - topInset(s)) / 2
+        // In the banner the artwork/bars hold the top band (beside the
+        // housing), not the banner's centre.
+        let band = (s == .open && mode.isAnnounce) ? max(housing(s), 28) : h - topInset(s)
+        let midY = h - topInset(s) - band / 2
         // As tall as the pill allows (the iPhone island fills its ends),
         // capped at miniSize so it never dominates a big virtual pill.
         let art = max(12, min(Self.miniSize, h - topInset(s) - 8))
@@ -594,7 +689,7 @@ private final class IslandView: NSView {
         // Text and glyphs rasterise for the screen the island is on — a 1×
         // external display drawn at 2× (or the reverse) looks soft.
         contentScale = scale
-        for l in [symbol, label, sublabel, timer] as [CALayer] { l.contentsScale = scale }
+        for l in [symbol, label, sublabel, timer, hudLabel, hudValue, hudIcon] as [CALayer] { l.contentsScale = scale }
         layoutPill(.closed, animated: false)
     }
 
@@ -629,6 +724,8 @@ private final class IslandView: NSView {
     }
     private func cornerRadius(_ s: IslandState) -> CGFloat {
         guard synthetic else {
+            if hudActive, s == .closed || s == .peek { return (housing(s) + chinHeight(s)) / 2 }
+            if s == .open, mode.isAnnounce { return 26 }
             // The media pill wraps the housing like the iPhone island: full
             // round ends.
             if mediaPill(s) { return (housing(s) + chinHeight(s)) / 2 }
@@ -647,7 +744,8 @@ private final class IslandView: NSView {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
         let over = s == .expanded ? expandedOverhang : Island.overhang(s)
-        let width = baseWidth(s) + (over + flare(s) + (mediaPill(s) ? mediaExtra : 0)) * 2
+        let hud = hudActive && (s == .closed || s == .peek) ? Self.hudExtra : 0
+        let width = baseWidth(s) + (over + flare(s) + max(hud, mediaPill(s) ? mediaExtra : 0)) * 2
         let height = housing(s) + chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -857,6 +955,7 @@ private final class IslandView: NSView {
     private func layoutContents(_ s: IslandState) {
         let open = s == .open
         layoutMini(s)
+        layoutHUD(s)
 
         // The key line separates black island from black housing; a virtual
         // island has no housing to separate from, and reads as an outline.
@@ -940,6 +1039,7 @@ private final class IslandView: NSView {
         case .working: tint = Tint.instruct
         case .done(let ok, _): tint = ok ? Tint.ok : Tint.fail
         case .notes: tint = WavePalette.dictate[1]
+        case .announce: tint = NSColor.white
         }
         let palette = mode == .instruct ? WavePalette.instruct : WavePalette.dictate
         for (i, wave) in waveLayers.enumerated() { wave.fillColor = palette[i].cgColor }
@@ -972,9 +1072,15 @@ private final class IslandView: NSView {
         case .working(let s, let sym): symbolName = sym; text = s
         case .done(let ok, let label): symbolName = ok ? "" : "xmark.circle.fill"; text = label
         case .notes: symbolName = ""
+        case .announce(let t, let a):
+            symbolName = "music.note"
+            text = a.isEmpty ? t : "\(t) · \(a)"
         }
+        let announcing = mode.isAnnounce
         if !symbolName.isEmpty {
-            symbol.contents = symbolImage(symbolName, size: Glyph.symbolSize, color: tint)
+            let size = announcing ? 12 : Glyph.symbolSize
+            let color = announcing ? NSColor.white.withAlphaComponent(0.6) : tint
+            symbol.contents = symbolImage(symbolName, size: size, color: color)
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -983,18 +1089,31 @@ private final class IslandView: NSView {
         // The refine hints use the compact two-line face; everything else the
         // single 15pt line.
         let twoLine = !sub.isEmpty
-        label.font = twoLine ? Text.titleFont : Text.font
-        label.fontSize = (twoLine ? Text.titleFont : Text.font).pointSize
+        let singleFont = announcing ? Text.titleFont : Text.font
+        label.font = twoLine ? Text.titleFont : singleFont
+        label.fontSize = (twoLine ? Text.titleFont : singleFont).pointSize
+        // The artist half of an announce goes quiet, like Alcove's.
+        if case .announce(let t, let a) = mode, !a.isEmpty {
+            let at = NSMutableAttributedString(
+                string: t,
+                attributes: [.font: Text.titleFont, .foregroundColor: NSColor.white]
+            )
+            at.append(NSAttributedString(
+                string: "  ·  \(a)",
+                attributes: [.font: Text.titleFont, .foregroundColor: NSColor.white.withAlphaComponent(0.55)]
+            ))
+            label.string = at
+        }
         sublabel.isHidden = !twoLine
         CATransaction.commit()
 
         // Measure the cluster: recording = wave · clock; otherwise glyph · label.
-        let glyphWidth = Glyph.symbolSize
-        let titleFont = twoLine ? Text.titleFont : Text.font
+        let glyphWidth = announcing ? 14 : Glyph.symbolSize
+        let titleFont = twoLine ? Text.titleFont : singleFont
         let titleWidth = text.isEmpty ? 0 : ceil((text as NSString).size(withAttributes: [.font: titleFont]).width) + 2
         let subWidth = sub.isEmpty ? 0 : ceil((sub as NSString).size(withAttributes: [.font: Text.subFont]).width) + 2
         // Never wider than the chin allows; CATextLayer truncates with an ellipsis.
-        let maxLabel = chinSize.width - 2 * (Island.flare(.open) + 12) - Glyph.symbolSize - gap
+        let maxLabel = chinSize.width - 2 * (Island.flare(.open) + 12) - glyphWidth - gap
         let labelWidth = min(max(titleWidth, subWidth), maxLabel)
         let instruct = mode == .instruct
         let waveWidth = instruct ? Wave.instructWidth : Wave.totalWidth
@@ -1262,6 +1381,36 @@ private final class IslandView: NSView {
 
     /// Mic level, 0...1, at ~24 Hz. Sets the wave's power target and the
     /// the 30 Hz tick eases toward it.
+    /// Song changed while the banner is up: flip the caption like the
+    /// iPhone island — the old line rolls away on a top hinge, the new one
+    /// rolls in and settles on a spring.
+    func announceSwap(_ m: IslandMode) {
+        guard state == .open, mode.isAnnounce else {
+            setMode(m)
+            return
+        }
+        var persp = CATransform3DIdentity
+        persp.m34 = -1 / 400
+        let out = CABasicAnimation(keyPath: "transform")
+        out.fromValue = CATransform3DIdentity
+        out.toValue = CATransform3DRotate(persp, .pi / 2, 1, 0, 0)
+        out.duration = 0.15
+        out.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self else { return }
+            self.setMode(m)
+            let back = springAnimation(keyPath: "transform", duration: 0.5, bounce: 0.25)
+            back.fromValue = CATransform3DRotate(persp, -.pi / 2, 1, 0, 0)
+            back.toValue = CATransform3DIdentity
+            self.content.transform = CATransform3DIdentity
+            self.content.add(back, forKey: "flip")
+        }
+        content.transform = CATransform3DRotate(persp, .pi / 2, 1, 0, 0)
+        content.add(out, forKey: "flip")
+        CATransaction.commit()
+    }
+
     func setLevel(_ level: CGFloat) {
         // Levels can trail the stop by a few callbacks; once the mode has left
         // recording they must not fight the wave's settle.
@@ -1399,6 +1548,94 @@ private struct SiriWave {
         for pt in top.reversed() { p.addLine(to: CGPoint(x: pt.x, y: 2 * midY - pt.y)) }
         p.closeSubpath()
         return p
+    }
+}
+
+// MARK: - System volume (for the Sound HUD)
+
+/// Watches the default output device's volume; the island shows a brief
+/// Sound HUD when it changes (volume keys, menu-bar slider). Re-attaches
+/// when the default output device itself changes.
+private enum VolumeWatcher {
+    private static var started = false
+    private static var device: AudioObjectID = 0
+    private static var onChange: ((Float, String) -> Void)?
+    private static var volumeBlock: AudioObjectPropertyListenerBlock?
+    private static var volAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+        mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private static var defAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    static func start(_ cb: @escaping (Float, String) -> Void) {
+        guard !started else { return }
+        started = true
+        onChange = cb
+        attach()
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &defAddr, .main
+        ) { _, _ in
+            detach()
+            attach()
+        }
+    }
+
+    private static func defaultOutput() -> AudioObjectID? {
+        var addr = defAddr
+        var id = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let ok = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id
+        ) == noErr && id != 0
+        return ok ? id : nil
+    }
+
+    private static func attach() {
+        guard let id = defaultOutput() else { return }
+        device = id
+        let block: AudioObjectPropertyListenerBlock = { _, _ in
+            onChange?(current(), icon())
+        }
+        volumeBlock = block
+        AudioObjectAddPropertyListenerBlock(device, &volAddr, .main, block)
+    }
+
+    private static func detach() {
+        guard device != 0, let block = volumeBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(device, &volAddr, .main, block)
+        volumeBlock = nil
+        device = 0
+    }
+
+    static func current() -> Float {
+        guard device != 0 else { return 0 }
+        var addr = volAddr
+        var v: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &v) == noErr else { return 0 }
+        return v
+    }
+
+    /// Headphone-ish outputs get the headphones glyph, like Alcove.
+    static func icon() -> String {
+        guard device != 0 else { return "speaker.wave.2.fill" }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var t: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        if AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &t) == noErr,
+           t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE {
+            return "headphones"
+        }
+        return "speaker.wave.2.fill"
     }
 }
 
@@ -1567,6 +1804,7 @@ private final class IslandController {
             object: nil, queue: .main
         ) { [weak self] _ in self?.screensChanged() }
         updateYielding()
+        startVolumeWatcher()
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             appObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
                 forName: name, object: nil, queue: .main
@@ -1759,16 +1997,75 @@ private final class IslandController {
         relayoutExpanded()
     }
 
+    private var lastAnnouncedTitle: String?
+    private var announceClose: DispatchWorkItem?
+    private var hudClose: DispatchWorkItem?
+    private var volumeWatcherStarted = false
+
+    /// The Sound HUD: volume keys widen the resting pill into icon · Sound ·
+    /// meter · value for a moment. Never over a gesture or another notch app.
+    private func startVolumeWatcher() {
+        guard !volumeWatcherStarted else { return }
+        volumeWatcherStarted = true
+        VolumeWatcher.start { [weak self] level, icon in
+            self?.showVolume(level, icon: icon)
+        }
+    }
+
+    private func showVolume(_ level: Float, icon: String) {
+        guard let view, !recording, !expanded, !yielding,
+              view.state == .closed || view.state == .peek else { return }
+        view.showHUD(level: level, icon: icon)
+        hudClose?.cancel()
+        let close = DispatchWorkItem { [weak self] in self?.view?.hideHUD() }
+        hudClose = close
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: close)
+    }
+
     func setNowPlaying(json: String) {
         guard let (_, view) = ensurePanel() else { return }
         view.mediaModel.load(json: json)
         let m = view.mediaModel
         view.setMedia(available: m.available, playing: m.playing, artwork: m.artwork, accent: NSColor(m.accent))
+        maybeAnnounce(view)
         // Media went away while the player was showing: fall back to notes.
         if expanded, view.expandedTab.tab == .player, !view.mediaModel.available {
             view.expandedTab.tab = .notes
             relayoutExpanded()
         }
+    }
+
+    /// A new track: drop the banner (or flip it if it's already up), then
+    /// retract after a beat. Never over a gesture, never while yielding —
+    /// Alcove announces its own songs.
+    private func maybeAnnounce(_ view: IslandView) {
+        let m = view.mediaModel
+        let title = m.available ? m.title : nil
+        defer { lastAnnouncedTitle = title }
+        guard let title, m.playing, let prev = lastAnnouncedTitle, prev != title,
+              !recording, !expanded, !yielding else { return }
+        let mode = IslandMode.announce(title: title, artist: m.artist)
+        if view.state == .open, view.mode.isAnnounce {
+            view.announceSwap(mode)
+        } else if view.state == .closed || view.state == .peek {
+            view.setMode(mode)
+            view.layoutPill(.open, animated: true)
+        } else {
+            return
+        }
+        announceClose?.cancel()
+        let close = DispatchWorkItem { [weak self] in
+            guard let self, !self.recording, !self.expanded,
+                  self.view?.mode.isAnnounce == true else { return }
+            self.view?.layoutPill(self.hovering ? .peek : .closed, animated: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Island.shrinkDuration + 0.1) { [weak self] in
+                guard let self, self.view?.mode.isAnnounce == true,
+                      self.view?.state != .open else { return }
+                self.view?.setMode(.dictate)
+            }
+        }
+        announceClose = close
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: close)
     }
 
     /// The card decides the expanded height; re-spring when it changes.
@@ -1805,6 +2102,10 @@ private final class IslandController {
         refineScreenAsync()
         pendingPeek?.cancel()
         pendingUnpeek?.cancel()
+        announceClose?.cancel()
+        if view.mode.isAnnounce { view.setMode(.dictate) }
+        hudClose?.cancel()
+        view.hideHUD()
         if expanded {
             expanded = false
             panel?.ignoresMouseEvents = true
