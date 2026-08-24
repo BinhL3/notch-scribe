@@ -5,8 +5,6 @@
 import AppKit
 import QuartzCore
 import CoreImage
-import CoreAudio
-import AudioToolbox
 import SwiftUI
 
 // MARK: - Geometry
@@ -2211,7 +2209,7 @@ private func expandedOverhang(for tab: ExpandedCard) -> CGFloat {
 /// as it needs to be (empty state is small), capped.
 private func expandedChinHeight(for tab: ExpandedCard, noteCount: Int) -> CGFloat {
     switch tab {
-    case .player: return 148
+    case .player: return 136
     case .notes:
         if noteCount == 0 { return 132 }
         let rows = CGFloat(min(noteCount, 5))
@@ -2308,46 +2306,23 @@ final class NowPlayingModel: ObservableObject {
     }
 }
 
-/// System output volume via CoreAudio — the card's slider talks to it
-/// directly, no round trip through Rust.
-enum SystemVolume {
-    private static func device() -> AudioObjectID? {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        var id = AudioObjectID(0)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr else { return nil }
-        return id
-    }
-    private static var addr: AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
-    }
-    static func get() -> Float {
-        guard let dev = device() else { return 0 }
-        var a = addr
-        var v: Float32 = 0
-        var size = UInt32(MemoryLayout<Float32>.size)
-        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &v) == noErr else { return 0 }
-        return v
-    }
-    static func set(_ value: Float) {
-        guard let dev = device() else { return }
-        var a = addr
-        var v = Float32(max(0, min(1, value)))
-        AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-    }
-}
-
 @available(macOS 14.0, *)
 struct ExpandedView: View {
     @ObservedObject var notes: NotesModel
     @ObservedObject var media: NowPlayingModel
     @ObservedObject var tab: ExpandedTab
 
+    private func switchCard() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            tab.tab = tab.tab == .player ? .notes : .player
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
                 if tab.tab == .player && media.available {
-                    NowPlayingView(model: media)
+                    NowPlayingView(model: media, onSwitch: switchCard)
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 } else {
                     NotesListView(model: notes)
@@ -2355,14 +2330,11 @@ struct ExpandedView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // The other card, one quiet glyph away. Only when there is one.
-            if media.available {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        tab.tab = tab.tab == .player ? .notes : .player
-                    }
-                } label: {
-                    Image(systemName: tab.tab == .player ? "list.bullet" : "music.note")
+            // The player reaches notes from its transport row; the notes
+            // card gets one quiet glyph back to the player.
+            if media.available && tab.tab == .notes {
+                Button { switchCard() } label: {
+                    Image(systemName: "music.note")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.55))
                         .frame(width: 22, height: 22)
@@ -2378,43 +2350,56 @@ struct ExpandedView: View {
     }
 }
 
-/// Alcove-style player: artwork · title/artist · progress · transport · volume.
+/// Alcove-style player: big artwork · title/artist · bars, thin timeline,
+/// one tight transport row. No volume row — the card stays compact.
 @available(macOS 14.0, *)
 struct NowPlayingView: View {
     @ObservedObject var model: NowPlayingModel
+    var onSwitch: () -> Void
     @State private var scrubbing: Double? = nil
-    @State private var volume: Float = SystemVolume.get()
 
     var body: some View {
-        VStack(spacing: 7) {
-            HStack(spacing: 10) {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
                 artwork
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
                     Text(model.artist.isEmpty ? model.album : model.artist)
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
                 Bars(playing: model.playing, color: model.accent)
                     .frame(width: 18, height: 14)
-                    .padding(.trailing, 30) // room for the card switch
             }
             timeline
-            HStack(spacing: 30) {
-                transport("backward.fill", size: 16) { mediaActionCallback?(3, 0) }
-                transport(model.playing ? "pause.fill" : "play.fill", size: 22) { mediaActionCallback?(1, 0) }
-                transport("forward.fill", size: 16) { mediaActionCallback?(2, 0) }
+            HStack {
+                // A leading spacer the width of the trailing glyph, so the
+                // transport cluster is truly centred.
+                Color.clear.frame(width: 26, height: 26)
+                Spacer()
+                HStack(spacing: 26) {
+                    transport("backward.fill", size: 15) { mediaActionCallback?(3, 0) }
+                    transport(model.playing ? "pause.fill" : "play.fill", size: 21) { mediaActionCallback?(1, 0) }
+                    transport("forward.fill", size: 15) { mediaActionCallback?(2, 0) }
+                }
+                Spacer()
+                Button(action: onSwitch) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
             }
-            .frame(maxWidth: .infinity)
-            volumeRow
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 4)
-        .padding(.bottom, 4)
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
     }
 
     private var artwork: some View {
@@ -2423,31 +2408,31 @@ struct NowPlayingView: View {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(0.08))
-                    Image(systemName: "music.note").font(.system(size: 18)).foregroundStyle(.white.opacity(0.4))
+                    RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08))
+                    Image(systemName: "music.note").font(.system(size: 22)).foregroundStyle(.white.opacity(0.4))
                 }
             }
         }
-        .frame(width: 40, height: 40)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(width: 60, height: 60)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var timeline: some View {
         TimelineView(.periodic(from: .now, by: model.playing ? 0.5 : 60)) { ctx in
             let elapsed = scrubbing ?? model.elapsedNow(at: ctx.date)
             let total = max(model.duration, 0.001)
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Text(fmt(elapsed))
-                    .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(width: 38, alignment: .trailing)
+                    .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.45))
+                    .frame(width: 32, alignment: .trailing)
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.18))
+                        Capsule().fill(Color.white.opacity(0.16))
                         Capsule().fill(model.accent.opacity(0.9))
                             .frame(width: max(4, geo.size.width * CGFloat(min(1, elapsed / total))))
                     }
-                    .frame(height: 5)
+                    .frame(height: 4)
                     .frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0)
@@ -2461,36 +2446,13 @@ struct NowPlayingView: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { scrubbing = nil }
                         })
                 }
-                .frame(height: 16)
+                .frame(height: 14)
                 Text("-" + fmt(max(0, total - elapsed)))
-                    .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(width: 42, alignment: .leading)
+                    .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.45))
+                    .frame(width: 36, alignment: .leading)
             }
         }
-    }
-
-    private var volumeRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "speaker.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.18))
-                    Capsule().fill(Color.white.opacity(0.75))
-                        .frame(width: max(4, geo.size.width * CGFloat(volume)))
-                }
-                .frame(height: 4)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-                    volume = Float(max(0, min(1, g.location.x / geo.size.width)))
-                    SystemVolume.set(volume)
-                })
-            }
-            .frame(height: 14)
-            Image(systemName: "speaker.wave.2.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(.horizontal, 6)
     }
 
     private func transport(_ name: String, size: CGFloat, action: @escaping () -> Void) -> some View {
@@ -2498,7 +2460,7 @@ struct NowPlayingView: View {
             Image(systemName: name)
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(.white)
-                .frame(width: 36, height: 28)
+                .frame(width: 34, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
