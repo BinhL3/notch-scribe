@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "resources": ["resources/**/*"],
     "license": "MIT",
@@ -78,9 +78,11 @@
   },
   "plugins": {
     "updater": {
-      "active": false,
-      "pubkey": "",
-      "endpoints": []
+      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyNTEyMDNFN0YyNENDMzcKUldRM3pDUi9QaUJSSWpyQ1pkdjVIbE84NytLOUhldGg0MURMd1AySnErbFFKeFdpWE9xUnk0eHYK",
+      "endpoints": [
+        "https://github.com/BinhL3/noi/releases/latest/download/latest.json"
+      ]
     }
   }
 }

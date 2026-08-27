@@ -80,9 +80,13 @@ with a Developer ID.
 
 ```sh
 bun install && bun run tauri dev          # develop
-bun run tauri build                        # .dmg in src-tauri/target/release/bundle/dmg
-gh release create vX.Y.Z <dmg> -R BinhL3/noi --title "Noi X.Y.Z" --notes-file notes.md
+scripts/release.sh X.Y.Z notes.md          # bump, build, sign, latest.json, GitHub release
 ```
+
+In-app **Check for Updates** works from 0.1.0 on: the updater reads
+`releases/latest/download/latest.json`, verifies the Tauri signature
+(`~/.tauri/noi.key` — private, never in the repo; back it up) and swaps the
+app in place. Users never reinstall by hand.
 
 If a build fails with a `notch-scribe/handy/...` path, the `target/` cache
 predates the folder rename: delete `target/{debug,release}/build/tauri-*`,
