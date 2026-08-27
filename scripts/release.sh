@@ -28,7 +28,8 @@ if ! git diff --quiet; then
 fi
 
 # 2. Build. createUpdaterArtifacts=true makes Noi.app.tar.gz + .sig next to the .app.
-TAURI_SIGNING_PRIVATE_KEY_PATH="$KEY" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+# The bundler wants the key's contents, not a path.
+TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
   bun run tauri build
 
 BUNDLE=src-tauri/target/release/bundle
