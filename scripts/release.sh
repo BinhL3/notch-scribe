@@ -22,7 +22,8 @@ cd "$(dirname "$0")/.."
 
 # 1. Version in the three places Tauri reads it.
 sed -i '' "s/\"version\": \"[0-9.]*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json package.json
-sed -i '' "0,/^version = \"[0-9.]*\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
+# BSD sed: no `0,/re/`; the package version is the first `version =` line.
+sed -i '' "1,/^version = /s/^version = \"[0-9.]*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
 if ! git diff --quiet; then
   git commit -qam "chore: version $VERSION"
 fi
