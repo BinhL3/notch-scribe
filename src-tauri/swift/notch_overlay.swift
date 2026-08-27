@@ -5,8 +5,6 @@
 import AppKit
 import QuartzCore
 import CoreImage
-import CoreAudio
-import AudioToolbox
 import SwiftUI
 
 // MARK: - Geometry
@@ -37,12 +35,6 @@ enum IslandMode: Equatable {
     case done(ok: Bool, label: String)
     /// The notes list is showing (expanded state); the chin cluster is empty.
     case notes
-    /// The track changed: a brief banner under the housing — artwork and
-    /// bars stay in the top band, "Title · Artist" beneath (the iPhone
-    /// island's song-change moment). Auto-closes.
-    case announce(title: String, artist: String)
-
-    var isAnnounce: Bool { if case .announce = self { return true }; return false }
 
     var isDone: Bool { if case .done = self { return true }; return false }
     var isSuccess: Bool { if case .done(let ok, _) = self { return ok }; return false }
@@ -83,7 +75,7 @@ private enum Island {
     /// nearly critically damped — a bounce on the way shut looks indecisive.
     static let growDuration: CFTimeInterval = 0.55
     static let growBounce: CGFloat = 0.15
-    /// Expanding to a card is the big move; it gets a visibly springy landing.
+    /// Expanding to the list is the big move; it gets a visibly springy landing.
     static let expandDuration: CFTimeInterval = 0.6
     static let expandBounce: CGFloat = 0.28
     /// Peek moves a few points; on the open spring it feels like lag.
@@ -227,41 +219,6 @@ private final class IslandView: NSView {
     private let shadowLayer = CALayer()
     /// Hairline light along the pill's edge, drawn above the contents.
     private let rim = CAShapeLayer()
-    /// Now Playing at rest: a tiny artwork left of the housing and four
-    /// dancing bars right of it (Alcove / iPhone island). Only while closed
-    /// or peeking with media available and nothing being recorded.
-    private let miniArt = CALayer()
-    private let miniBars: [CAShapeLayer] = (0..<4).map { _ in CAShapeLayer() }
-    private var mediaAvailable = false
-    private var mediaPlaying = false
-    private var barsAccent: CGColor = NSColor.white.cgColor
-    /// Sound HUD: icon + "Sound" left of the housing, meter + value right.
-    /// Shown briefly when the system volume changes; wins over the media
-    /// mini while up.
-    private let hudIcon = CALayer()
-    private let hudLabel = CATextLayer()
-    private let hudTrack = CAShapeLayer()
-    private let hudFill = CAShapeLayer()
-    private let hudValue = CATextLayer()
-    private(set) var hudActive = false
-    private var hudLevel: Float = 0
-    private var hudIconName = "speaker.wave.2.fill"
-    private static let hudExtra: CGFloat = 104
-    private static let hudGreen = NSColor(red: 0.42, green: 0.83, blue: 0.6, alpha: 1)
-
-    private static let miniSize: CGFloat = 20
-    private static let miniPad: CGFloat = 6
-    /// Whether the bars are currently animating (avoid restarting them on
-    /// every update — a restart snaps the phase and shifts pixels).
-    private var barsDancing = false
-    /// Extra pill width per side while the media pill shows.
-    private var mediaExtra: CGFloat { Self.miniSize + Self.miniPad * 2 - Island.overhang(.closed) }
-    private func mediaPill(_ s: IslandState) -> Bool {
-        if yielding || !mediaAvailable || hudActive { return false }
-        // The banner keeps the artwork and bars in its top band.
-        if s == .open, mode.isAnnounce { return true }
-        return s == .closed || s == .peek
-    }
     /// Clips everything inside the pill to the island outline, and rides
     /// the same spring, so content is revealed BY the shape opening — it
     /// cannot be seen where the island has not yet grown. Without this the
@@ -307,16 +264,12 @@ private final class IslandView: NSView {
     /// The notes list (SwiftUI) shown in the expanded state. An NSView, so it
     /// sits above the layers; faded in once the shape has grown.
     let notesModel = NotesModel()
-    let mediaModel = NowPlayingModel()
-    /// Which card the expanded island shows; the player when something is
-    /// playing, else the inbox. The user can flip it from the card.
-    let expandedTab = ExpandedTab()
     private var notesHostView: NSView?
     /// Created on first use; nil before macOS 14 (no notch Mac runs that).
     private var notesHost: NSView? {
         if let notesHostView { return notesHostView }
         guard #available(macOS 14.0, *) else { return nil }
-        let h = NSHostingView(rootView: ExpandedView(notes: notesModel, media: mediaModel, tab: expandedTab))
+        let h = NSHostingView(rootView: NotesListView(model: notesModel))
         h.alphaValue = 0
         h.isHidden = true
         addSubview(h)
@@ -388,15 +341,11 @@ private final class IslandView: NSView {
 
     private var cutoutWidth: CGFloat = 186
     private var safeAreaTop: CGFloat = 32
-    /// The expanded chin depends on what it shows: the player card is
-    /// shorter than the notes list. Set before layoutPill(.expanded).
+    /// The expanded chin follows the list: empty is small, capped when long.
+    /// Set before layoutPill(.expanded).
     var expandedChin: CGFloat = Island.chinHeight(.expanded)
-    var expandedOverhang: CGFloat = Island.overhang(.expanded)
     private func chinHeight(_ s: IslandState) -> CGFloat {
-        if s == .expanded { return expandedChin }
-        // The song banner is shallower than a full open.
-        if s == .open, mode.isAnnounce { return 46 }
-        return Island.chinHeight(s)
+        s == .expanded ? expandedChin : Island.chinHeight(s)
     }
     /// No hardware housing on this screen: draw nothing at rest.
     private var synthetic = false
@@ -526,161 +475,9 @@ private final class IslandView: NSView {
 
         // Above the contents so the hairline is never painted over.
         pill.addSublayer(rim)
-
-        miniArt.cornerRadius = 5
-        miniArt.masksToBounds = true
-        miniArt.contentsGravity = .resizeAspectFill
-        miniArt.opacity = 0
-        miniArt.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        pill.addSublayer(miniArt)
-        for bar in miniBars {
-            bar.fillColor = barsAccent
-            bar.opacity = 0
-            pill.addSublayer(bar)
-        }
-
-        hudIcon.contentsGravity = .resizeAspect
-        hudLabel.string = "Sound"
-        hudLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        hudLabel.fontSize = 13
-        hudLabel.foregroundColor = NSColor.white.cgColor
-        hudValue.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        hudValue.fontSize = 12
-        hudValue.foregroundColor = NSColor.white.withAlphaComponent(0.85).cgColor
-        hudValue.alignmentMode = .right
-        hudTrack.fillColor = NSColor.white.withAlphaComponent(0.22).cgColor
-        hudFill.fillColor = Self.hudGreen.cgColor
-        for l in [hudIcon, hudLabel, hudTrack, hudFill, hudValue] as [CALayer] {
-            l.opacity = 0
-            pill.addSublayer(l)
-        }
-    }
-
-    /// Volume changed: widen into the Sound pill (or just move the meter if
-    /// it is already up).
-    func showHUD(level: Float, icon: String) {
-        hudLevel = level
-        hudIconName = icon
-        let was = hudActive
-        hudActive = true
-        if was { layoutHUD(state) } else { layoutPill(state, animated: true) }
-    }
-
-    func hideHUD() {
-        guard hudActive else { return }
-        hudActive = false
-        layoutPill(state, animated: true)
-    }
-
-    private func layoutHUD(_ s: IslandState) {
-        let show = hudActive && (s == .closed || s == .peek) && pillVisible(s)
-        let f = pillFrame(s)
-        let h = housing(s) + chinHeight(s)
-        let midY = (h - topInset(s)) / 2
-        let alpha: Float = show ? 1 : 0
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.2)
-        // Left cluster: icon · Sound.
-        let iconSize: CGFloat = 16
-        var x = (-f.width / 2 + 14 + flare(s)).rounded()
-        hudIcon.contents = symbolImage(hudIconName, size: 13, color: .white)
-        hudIcon.frame = CGRect(x: x, y: (midY - iconSize / 2).rounded(), width: iconSize, height: iconSize)
-        x += iconSize + 7
-        let labelH = ceil(NSFont.systemFont(ofSize: 13, weight: .semibold).ascender - NSFont.systemFont(ofSize: 13).descender)
-        hudLabel.frame = CGRect(x: x, y: (midY - labelH / 2).rounded() - 1, width: 60, height: labelH)
-        // Right cluster: meter · value.
-        let valueW: CGFloat = 26
-        let meterW: CGFloat = 46
-        let right = (f.width / 2 - 14 - flare(s)).rounded()
-        hudValue.frame = CGRect(x: right - valueW, y: (midY - 8).rounded(), width: valueW, height: 15)
-        hudValue.string = "\(Int((hudLevel * 100).rounded()))"
-        let track = CGRect(x: right - valueW - 9 - meterW, y: (midY - 2.5).rounded(), width: meterW, height: 5)
-        hudTrack.frame = track
-        hudTrack.path = CGPath(roundedRect: CGRect(origin: .zero, size: track.size), cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
-        let fillW = max(hudLevel > 0 ? 5 : 0, meterW * CGFloat(hudLevel))
-        hudFill.frame = CGRect(x: track.minX, y: track.minY, width: fillW, height: 5)
-        hudFill.path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: fillW, height: 5), cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
-        for l in [hudIcon, hudLabel, hudTrack, hudFill, hudValue] as [CALayer] { l.opacity = alpha }
-        CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { nil }
-
-    /// Rust/SwiftUI tell us what is playing; the resting pill grows around
-    /// the housing to show it, and shrinks back when it stops.
-    func setMedia(available: Bool, playing: Bool, artwork: NSImage?, accent: NSColor) {
-        let wasPill = mediaPill(state)
-        mediaAvailable = available
-        mediaPlaying = playing
-        barsAccent = accent.cgColor
-        if let artwork, let cg = artwork.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            miniArt.contents = cg
-        } else if !available {
-            miniArt.contents = nil
-        }
-        for bar in miniBars { bar.fillColor = barsAccent }
-        if mediaPill(state) != wasPill {
-            layoutPill(state, animated: true)
-        } else {
-            layoutMini(state)
-        }
-    }
-
-    /// Place and animate the mini artwork + bars for a state.
-    private func layoutMini(_ s: IslandState) {
-        let show = mediaPill(s)
-        let f = pillFrame(s)
-        // Pill-local coordinates: origin at bottom-centre of the pill layer's
-        // bounds (islandBounds), y up.
-        let h = housing(s) + chinHeight(s)
-        // In the banner the artwork/bars hold the top band (beside the
-        // housing), not the banner's centre.
-        let band = (s == .open && mode.isAnnounce) ? max(housing(s), 28) : h - topInset(s)
-        let midY = h - topInset(s) - band / 2
-        // As tall as the pill allows (the iPhone island fills its ends),
-        // capped at miniSize so it never dominates a big virtual pill.
-        let art = max(12, min(Self.miniSize, h - topInset(s) - 8))
-        let leftX = (-f.width / 2 + Self.miniPad + flare(s)).rounded()
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.25)
-        miniArt.frame = CGRect(x: leftX, y: (midY - art / 2).rounded(), width: art, height: art)
-        miniArt.opacity = show ? 1 : 0
-        let barW: CGFloat = 2.5, gap: CGFloat = 2.5, maxH: CGFloat = 12
-        let barsW = barW * 4 + gap * 3
-        let rightX = (f.width / 2 - Self.miniPad - flare(s) - barsW).rounded()
-        let dance = show && mediaPlaying
-        for (i, bar) in miniBars.enumerated() {
-            let x = rightX + CGFloat(i) * (barW + gap)
-            // Fixed geometry (a full-height bar), pixel-aligned; only the
-            // scale changes, so nothing re-rasterises or shifts.
-            if bar.path == nil {
-                bar.bounds = CGRect(x: 0, y: 0, width: barW, height: maxH)
-                bar.path = CGPath(roundedRect: bar.bounds, cornerWidth: barW / 2, cornerHeight: barW / 2, transform: nil)
-            }
-            bar.position = CGPoint(x: x + barW / 2, y: midY.rounded())
-            bar.opacity = show ? 1 : 0
-            let rest: CGFloat = 3 / maxH
-            if dance {
-                if !barsDancing {
-                    let a = CAKeyframeAnimation(keyPath: "transform.scale.y")
-                    let peaks: [[CGFloat]] = [[0.35, 0.9, 0.5, 0.75], [1.0, 0.45, 0.8, 0.6], [0.5, 0.95, 0.4, 0.85], [0.7, 0.4, 0.9, 0.55]]
-                    a.values = peaks[i] + [peaks[i][0]]
-                    a.duration = 0.9 + Double(i) * 0.13
-                    a.repeatCount = .infinity
-                    a.calculationMode = .cubic
-                    a.beginTime = CACurrentMediaTime() + Double(i) * 0.05
-                    a.fillMode = .backwards
-                    bar.transform = CATransform3DMakeScale(1, peaks[i][0], 1)
-                    bar.add(a, forKey: "dance")
-                }
-            } else {
-                bar.removeAnimation(forKey: "dance")
-                bar.transform = CATransform3DMakeScale(1, rest, 1)
-            }
-        }
-        barsDancing = dance
-        CATransaction.commit()
-    }
 
     func configure(cutoutWidth: CGFloat, safeAreaTop: CGFloat, synthetic: Bool, scale: CGFloat) {
         self.cutoutWidth = cutoutWidth
@@ -689,7 +486,7 @@ private final class IslandView: NSView {
         // Text and glyphs rasterise for the screen the island is on — a 1×
         // external display drawn at 2× (or the reverse) looks soft.
         contentScale = scale
-        for l in [symbol, label, sublabel, timer, hudLabel, hudValue, hudIcon] as [CALayer] { l.contentsScale = scale }
+        for l in [symbol, label, sublabel, timer] as [CALayer] { l.contentsScale = scale }
         layoutPill(.closed, animated: false)
     }
 
@@ -723,14 +520,7 @@ private final class IslandView: NSView {
         synthetic && (s == .open || s == .expanded) ? 12 : safeAreaTop
     }
     private func cornerRadius(_ s: IslandState) -> CGFloat {
-        guard synthetic else {
-            if hudActive, s == .closed || s == .peek { return (housing(s) + chinHeight(s)) / 2 }
-            if s == .open, mode.isAnnounce { return 26 }
-            // The media pill wraps the housing like the iPhone island: full
-            // round ends.
-            if mediaPill(s) { return (housing(s) + chinHeight(s)) / 2 }
-            return Island.cornerRadius(s)
-        }
+        guard synthetic else { return Island.cornerRadius(s) }
         return switch s {
         // Resting states are stadiums: radius = half the visible height.
         case .closed, .peek: (housing(s) + chinHeight(s) - topInset(s)) / 2
@@ -743,9 +533,7 @@ private final class IslandView: NSView {
     private func pillFrame(_ s: IslandState) -> CGRect {
         // The frame includes the flares; the body is inset by flare per side,
         // so the visible body still covers the cutout (plus slop) when closed.
-        let over = s == .expanded ? expandedOverhang : Island.overhang(s)
-        let hud = hudActive && (s == .closed || s == .peek) ? Self.hudExtra : 0
-        let width = baseWidth(s) + (over + flare(s) + max(hud, mediaPill(s) ? mediaExtra : 0)) * 2
+        let width = baseWidth(s) + (Island.overhang(s) + flare(s)) * 2
         let height = housing(s) + chinHeight(s)
         return CGRect(
             x: (bounds.width - width) / 2,
@@ -790,7 +578,7 @@ private final class IslandView: NSView {
             layer.anchorPoint = CGPoint(x: 0.5, y: 1)
             layer.position = CGPoint(x: host.frame.midX, y: host.frame.maxY)
             if animated {
-                // The card is revealed by the shape opening: it starts a beat
+                // The list is revealed by the shape opening: it starts a beat
                 // later, slightly small and soft, and springs to place while
                 // the island is still settling — never a flat fade.
                 layer.opacity = 0
@@ -872,9 +660,9 @@ private final class IslandView: NSView {
             return
         }
 
-        let toCard = s == .expanded
-        var duration = toCard ? Island.expandDuration : growing ? Island.growDuration : Island.shrinkDuration
-        var bounce = toCard ? Island.expandBounce : growing ? Island.growBounce : Island.shrinkBounce
+        let toList = s == .expanded
+        var duration = toList ? Island.expandDuration : growing ? Island.growDuration : Island.shrinkDuration
+        var bounce = toList ? Island.expandBounce : growing ? Island.growBounce : Island.shrinkBounce
         if peeking {
             duration = Island.peekDuration
             bounce = growing ? Island.peekBounce : 0.08
@@ -954,8 +742,6 @@ private final class IslandView: NSView {
     /// housing occupies the top `safeAreaTop` points.
     private func layoutContents(_ s: IslandState) {
         let open = s == .open
-        layoutMini(s)
-        layoutHUD(s)
 
         // The key line separates black island from black housing; a virtual
         // island has no housing to separate from, and reads as an outline.
@@ -1039,7 +825,6 @@ private final class IslandView: NSView {
         case .working: tint = Tint.instruct
         case .done(let ok, _): tint = ok ? Tint.ok : Tint.fail
         case .notes: tint = WavePalette.dictate[1]
-        case .announce: tint = NSColor.white
         }
         let palette = mode == .instruct ? WavePalette.instruct : WavePalette.dictate
         for (i, wave) in waveLayers.enumerated() { wave.fillColor = palette[i].cgColor }
@@ -1072,15 +857,9 @@ private final class IslandView: NSView {
         case .working(let s, let sym): symbolName = sym; text = s
         case .done(let ok, let label): symbolName = ok ? "" : "xmark.circle.fill"; text = label
         case .notes: symbolName = ""
-        case .announce(let t, let a):
-            symbolName = "music.note"
-            text = a.isEmpty ? t : "\(t) · \(a)"
         }
-        let announcing = mode.isAnnounce
         if !symbolName.isEmpty {
-            let size = announcing ? 12 : Glyph.symbolSize
-            let color = announcing ? NSColor.white.withAlphaComponent(0.6) : tint
-            symbol.contents = symbolImage(symbolName, size: size, color: color)
+            symbol.contents = symbolImage(symbolName, size: Glyph.symbolSize, color: tint)
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1089,31 +868,18 @@ private final class IslandView: NSView {
         // The refine hints use the compact two-line face; everything else the
         // single 15pt line.
         let twoLine = !sub.isEmpty
-        let singleFont = announcing ? Text.titleFont : Text.font
-        label.font = twoLine ? Text.titleFont : singleFont
-        label.fontSize = (twoLine ? Text.titleFont : singleFont).pointSize
-        // The artist half of an announce goes quiet, like Alcove's.
-        if case .announce(let t, let a) = mode, !a.isEmpty {
-            let at = NSMutableAttributedString(
-                string: t,
-                attributes: [.font: Text.titleFont, .foregroundColor: NSColor.white]
-            )
-            at.append(NSAttributedString(
-                string: "  ·  \(a)",
-                attributes: [.font: Text.titleFont, .foregroundColor: NSColor.white.withAlphaComponent(0.55)]
-            ))
-            label.string = at
-        }
+        label.font = twoLine ? Text.titleFont : Text.font
+        label.fontSize = (twoLine ? Text.titleFont : Text.font).pointSize
         sublabel.isHidden = !twoLine
         CATransaction.commit()
 
         // Measure the cluster: recording = wave · clock; otherwise glyph · label.
-        let glyphWidth = announcing ? 14 : Glyph.symbolSize
-        let titleFont = twoLine ? Text.titleFont : singleFont
+        let glyphWidth = Glyph.symbolSize
+        let titleFont = twoLine ? Text.titleFont : Text.font
         let titleWidth = text.isEmpty ? 0 : ceil((text as NSString).size(withAttributes: [.font: titleFont]).width) + 2
         let subWidth = sub.isEmpty ? 0 : ceil((sub as NSString).size(withAttributes: [.font: Text.subFont]).width) + 2
         // Never wider than the chin allows; CATextLayer truncates with an ellipsis.
-        let maxLabel = chinSize.width - 2 * (Island.flare(.open) + 12) - glyphWidth - gap
+        let maxLabel = chinSize.width - 2 * (Island.flare(.open) + 12) - Glyph.symbolSize - gap
         let labelWidth = min(max(titleWidth, subWidth), maxLabel)
         let instruct = mode == .instruct
         let waveWidth = instruct ? Wave.instructWidth : Wave.totalWidth
@@ -1381,36 +1147,6 @@ private final class IslandView: NSView {
 
     /// Mic level, 0...1, at ~24 Hz. Sets the wave's power target and the
     /// the 30 Hz tick eases toward it.
-    /// Song changed while the banner is up: flip the caption like the
-    /// iPhone island — the old line rolls away on a top hinge, the new one
-    /// rolls in and settles on a spring.
-    func announceSwap(_ m: IslandMode) {
-        guard state == .open, mode.isAnnounce else {
-            setMode(m)
-            return
-        }
-        var persp = CATransform3DIdentity
-        persp.m34 = -1 / 400
-        let out = CABasicAnimation(keyPath: "transform")
-        out.fromValue = CATransform3DIdentity
-        out.toValue = CATransform3DRotate(persp, .pi / 2, 1, 0, 0)
-        out.duration = 0.15
-        out.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak self] in
-            guard let self else { return }
-            self.setMode(m)
-            let back = springAnimation(keyPath: "transform", duration: 0.5, bounce: 0.25)
-            back.fromValue = CATransform3DRotate(persp, -.pi / 2, 1, 0, 0)
-            back.toValue = CATransform3DIdentity
-            self.content.transform = CATransform3DIdentity
-            self.content.add(back, forKey: "flip")
-        }
-        content.transform = CATransform3DRotate(persp, .pi / 2, 1, 0, 0)
-        content.add(out, forKey: "flip")
-        CATransaction.commit()
-    }
-
     func setLevel(_ level: CGFloat) {
         // Levels can trail the stop by a few callbacks; once the mode has left
         // recording they must not fight the wave's settle.
@@ -1548,94 +1284,6 @@ private struct SiriWave {
         for pt in top.reversed() { p.addLine(to: CGPoint(x: pt.x, y: 2 * midY - pt.y)) }
         p.closeSubpath()
         return p
-    }
-}
-
-// MARK: - System volume (for the Sound HUD)
-
-/// Watches the default output device's volume; the island shows a brief
-/// Sound HUD when it changes (volume keys, menu-bar slider). Re-attaches
-/// when the default output device itself changes.
-private enum VolumeWatcher {
-    private static var started = false
-    private static var device: AudioObjectID = 0
-    private static var onChange: ((Float, String) -> Void)?
-    private static var volumeBlock: AudioObjectPropertyListenerBlock?
-    private static var volAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-        mScope: kAudioDevicePropertyScopeOutput,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    private static var defAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-
-    static func start(_ cb: @escaping (Float, String) -> Void) {
-        guard !started else { return }
-        started = true
-        onChange = cb
-        attach()
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &defAddr, .main
-        ) { _, _ in
-            detach()
-            attach()
-        }
-    }
-
-    private static func defaultOutput() -> AudioObjectID? {
-        var addr = defAddr
-        var id = AudioObjectID(0)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        let ok = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id
-        ) == noErr && id != 0
-        return ok ? id : nil
-    }
-
-    private static func attach() {
-        guard let id = defaultOutput() else { return }
-        device = id
-        let block: AudioObjectPropertyListenerBlock = { _, _ in
-            onChange?(current(), icon())
-        }
-        volumeBlock = block
-        AudioObjectAddPropertyListenerBlock(device, &volAddr, .main, block)
-    }
-
-    private static func detach() {
-        guard device != 0, let block = volumeBlock else { return }
-        AudioObjectRemovePropertyListenerBlock(device, &volAddr, .main, block)
-        volumeBlock = nil
-        device = 0
-    }
-
-    static func current() -> Float {
-        guard device != 0 else { return 0 }
-        var addr = volAddr
-        var v: Float32 = 0
-        var size = UInt32(MemoryLayout<Float32>.size)
-        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &v) == noErr else { return 0 }
-        return v
-    }
-
-    /// Headphone-ish outputs get the headphones glyph, like Alcove.
-    static func icon() -> String {
-        guard device != 0 else { return "speaker.wave.2.fill" }
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var t: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        if AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &t) == noErr,
-           t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE {
-            return "headphones"
-        }
-        return "speaker.wave.2.fill"
     }
 }
 
@@ -1804,7 +1452,6 @@ private final class IslandController {
             object: nil, queue: .main
         ) { [weak self] _ in self?.screensChanged() }
         updateYielding()
-        startVolumeWatcher()
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             appObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
                 forName: name, object: nil, queue: .main
@@ -1971,11 +1618,8 @@ private final class IslandController {
         // The panel takes the mouse only while expanded, so it never steals
         // menu-bar clicks at rest.
         panel.ignoresMouseEvents = false
-        view.expandedTab.tab = view.mediaModel.playing ? .player : .notes
-        view.expandedTab.onChange = { [weak self] in self?.relayoutExpanded() }
         view.notesModel.onCountChange = { [weak self] in self?.relayoutExpanded() }
-        view.expandedChin = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
-        view.expandedOverhang = expandedOverhang(for: view.expandedTab.tab)
+        view.expandedChin = expandedChinHeight(noteCount: view.notesModel.items.count)
         view.setMode(.notes)
         view.layoutPill(.expanded, animated: true)
     }
@@ -1997,85 +1641,20 @@ private final class IslandController {
         relayoutExpanded()
     }
 
-    private var lastAnnouncedTitle: String?
-    private var announceClose: DispatchWorkItem?
-    private var hudClose: DispatchWorkItem?
-    private var volumeWatcherStarted = false
-
-    /// The Sound HUD: volume keys widen the resting pill into icon · Sound ·
-    /// meter · value for a moment. Never over a gesture or another notch app.
-    private func startVolumeWatcher() {
-        guard !volumeWatcherStarted else { return }
-        volumeWatcherStarted = true
-        VolumeWatcher.start { [weak self] level, icon in
-            self?.showVolume(level, icon: icon)
-        }
+    /// Chin height for the inbox: as tall as its rows (empty state is
+    /// small), capped.
+    private func expandedChinHeight(noteCount: Int) -> CGFloat {
+        if noteCount == 0 { return 132 }
+        let rows = CGFloat(min(noteCount, 5))
+        return min(Island.chinHeight(.expanded), 44 + rows * 52 + 8)
     }
 
-    private func showVolume(_ level: Float, icon: String) {
-        guard let view, !recording, !expanded, !yielding,
-              view.state == .closed || view.state == .peek else { return }
-        view.showHUD(level: level, icon: icon)
-        hudClose?.cancel()
-        let close = DispatchWorkItem { [weak self] in self?.view?.hideHUD() }
-        hudClose = close
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: close)
-    }
-
-    func setNowPlaying(json: String) {
-        guard let (_, view) = ensurePanel() else { return }
-        view.mediaModel.load(json: json)
-        let m = view.mediaModel
-        view.setMedia(available: m.available, playing: m.playing, artwork: m.artwork, accent: NSColor(m.accent))
-        maybeAnnounce(view)
-        // Media went away while the player was showing: fall back to notes.
-        if expanded, view.expandedTab.tab == .player, !view.mediaModel.available {
-            view.expandedTab.tab = .notes
-            relayoutExpanded()
-        }
-    }
-
-    /// A new track: drop the banner (or flip it if it's already up), then
-    /// retract after a beat. Never over a gesture, never while yielding —
-    /// Alcove announces its own songs.
-    private func maybeAnnounce(_ view: IslandView) {
-        let m = view.mediaModel
-        let title = m.available ? m.title : nil
-        defer { lastAnnouncedTitle = title }
-        guard let title, m.playing, let prev = lastAnnouncedTitle, prev != title,
-              !recording, !expanded, !yielding else { return }
-        let mode = IslandMode.announce(title: title, artist: m.artist)
-        if view.state == .open, view.mode.isAnnounce {
-            view.announceSwap(mode)
-        } else if view.state == .closed || view.state == .peek {
-            view.setMode(mode)
-            view.layoutPill(.open, animated: true)
-        } else {
-            return
-        }
-        announceClose?.cancel()
-        let close = DispatchWorkItem { [weak self] in
-            guard let self, !self.recording, !self.expanded,
-                  self.view?.mode.isAnnounce == true else { return }
-            self.view?.layoutPill(self.hovering ? .peek : .closed, animated: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + Island.shrinkDuration + 0.1) { [weak self] in
-                guard let self, self.view?.mode.isAnnounce == true,
-                      self.view?.state != .open else { return }
-                self.view?.setMode(.dictate)
-            }
-        }
-        announceClose = close
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: close)
-    }
-
-    /// The card decides the expanded height; re-spring when it changes.
+    /// The list decides the expanded height; re-spring when it changes.
     func relayoutExpanded() {
         guard let view, expanded else { return }
-        let h = expandedChinHeight(for: view.expandedTab.tab, noteCount: view.notesModel.items.count)
-        let o = expandedOverhang(for: view.expandedTab.tab)
-        guard h != view.expandedChin || o != view.expandedOverhang else { return }
+        let h = expandedChinHeight(noteCount: view.notesModel.items.count)
+        guard h != view.expandedChin else { return }
         view.expandedChin = h
-        view.expandedOverhang = o
         view.layoutPill(.expanded, animated: true)
     }
 
@@ -2102,10 +1681,6 @@ private final class IslandController {
         refineScreenAsync()
         pendingPeek?.cancel()
         pendingUnpeek?.cancel()
-        announceClose?.cancel()
-        if view.mode.isAnnounce { view.setMode(.dictate) }
-        hudClose?.cancel()
-        view.hideHUD()
         if expanded {
             expanded = false
             panel?.ignoresMouseEvents = true
@@ -2245,23 +1820,6 @@ public func notch_overlay_finish(_ outcome: Int32) {
 @_cdecl("notch_overlay_show_notes")
 public func notch_overlay_show_notes() {
     DispatchQueue.main.async { IslandController.shared.showNotes() }
-}
-
-/// Now-playing JSON from Rust (media.rs); {} when nothing is playing.
-@_cdecl("notch_overlay_set_now_playing")
-public func notch_overlay_set_now_playing(_ json: UnsafePointer<CChar>?) {
-    let s = json.map { String(cString: $0) } ?? "{}"
-    DispatchQueue.main.async { IslandController.shared.setNowPlaying(json: s) }
-}
-
-/// Rust registers a callback for the player's transport:
-/// 1 = toggle play/pause, 2 = next, 3 = previous, 4 = seek (arg = µs).
-public typealias MediaActionCallback = @convention(c) (Int32, Int64) -> Void
-nonisolated(unsafe) var mediaActionCallback: MediaActionCallback?
-
-@_cdecl("notch_overlay_set_media_callback")
-public func notch_overlay_set_media_callback(_ cb: MediaActionCallback?) {
-    mediaActionCallback = cb
 }
 
 @_cdecl("notch_overlay_hide")
@@ -2492,302 +2050,5 @@ struct NotesListView: View {
         .contentShape(Rectangle())
         .onTapGesture { model.copy(n) }
         .opacity(clearing ? 0.6 : 1)
-    }
-}
-
-
-// MARK: - Expanded card: Now Playing · Notes
-
-enum ExpandedCard { case player, notes }
-
-/// Horizontal reach past the cutout per card: the player is a compact
-/// Alcove-sized box, the notes list keeps the full width.
-private func expandedOverhang(for tab: ExpandedCard) -> CGFloat {
-    switch tab { case .player: return 56; case .notes: return Island.overhang(.expanded) }
-}
-
-/// Chin height per card: the player is a compact block; the inbox is as tall
-/// as it needs to be (empty state is small), capped.
-private func expandedChinHeight(for tab: ExpandedCard, noteCount: Int) -> CGFloat {
-    switch tab {
-    case .player: return 136
-    case .notes:
-        if noteCount == 0 { return 132 }
-        let rows = CGFloat(min(noteCount, 5))
-        return min(Island.chinHeight(.expanded), 44 + rows * 52 + 8)
-    }
-}
-
-/// Which card is showing. A tiny observable so the SwiftUI switch and the
-/// AppKit island (which owns the height) agree.
-final class ExpandedTab: ObservableObject {
-    @Published var tab: ExpandedCard = .notes { didSet { if tab != oldValue { onChange?() } } }
-    var onChange: (() -> Void)?
-}
-
-/// Now-playing state as Rust streams it (see media.rs). Artwork arrives only
-/// when it changes (`artworkKey`), so we keep the last image.
-final class NowPlayingModel: ObservableObject {
-    @Published var title = ""
-    @Published var artist = ""
-    @Published var album = ""
-    @Published var playing = false
-    @Published var bundleId: String?
-    @Published var durationMicros: Int64 = 0
-    /// Elapsed at `timestampMicros` (epoch µs); the view extrapolates.
-    @Published var elapsedMicros: Int64 = 0
-    @Published var timestampMicros: Int64 = 0
-    @Published var artwork: NSImage?
-    @Published var accent: Color = .white
-    private var artworkKey: UInt64 = 0
-
-    var available: Bool { !title.isEmpty }
-
-    func load(json: String) {
-        guard let data = json.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        title = obj["title"] as? String ?? ""
-        artist = obj["artist"] as? String ?? ""
-        album = obj["album"] as? String ?? ""
-        playing = obj["playing"] as? Bool ?? false
-        bundleId = obj["bundleIdentifier"] as? String
-        durationMicros = Self.int64(obj["durationMicros"])
-        elapsedMicros = Self.int64(obj["elapsedTimeMicros"])
-        timestampMicros = Self.int64(obj["timestampEpochMicros"])
-        let key = Self.uint64(obj["artworkKey"])
-        if key != artworkKey || (key != 0 && artwork == nil) {
-            if let b64 = obj["artworkData"] as? String, let d = Data(base64Encoded: b64), let img = NSImage(data: d) {
-                artwork = img
-                accent = Self.dominantColor(of: img) ?? .white
-                artworkKey = key
-            } else if key == 0 {
-                artwork = nil
-                accent = .white
-                artworkKey = 0
-            }
-        }
-        if !available { artwork = nil; artworkKey = 0 }
-    }
-
-    /// Where playback is right now, in seconds.
-    func elapsedNow(at date: Date) -> Double {
-        var e = Double(elapsedMicros) / 1_000_000
-        if playing, timestampMicros > 0 {
-            e += date.timeIntervalSince1970 - Double(timestampMicros) / 1_000_000
-        }
-        return max(0, min(e, duration))
-    }
-    var duration: Double { Double(durationMicros) / 1_000_000 }
-
-    private static func int64(_ v: Any?) -> Int64 {
-        if let n = v as? NSNumber { return n.int64Value }
-        return 0
-    }
-    /// Never `UInt64(int64Value)`: a value above Int64.max comes through as
-    /// negative and that conversion traps (it crashed the app once).
-    private static func uint64(_ v: Any?) -> UInt64 {
-        if let n = v as? NSNumber { return n.uint64Value }
-        return 0
-    }
-
-    /// Average colour of the artwork, lifted a little so it reads on black.
-    private static func dominantColor(of image: NSImage) -> Color? {
-        guard let tiff = image.tiffRepresentation, let ci = CIImage(data: tiff) else { return nil }
-        let extent = ci.extent
-        guard let filter = CIFilter(name: "CIAreaAverage", parameters: [kCIInputImageKey: ci, kCIInputExtentKey: CIVector(cgRect: extent)]),
-              let out = filter.outputImage else { return nil }
-        var px = [UInt8](repeating: 0, count: 4)
-        CIContext(options: [.workingColorSpace: NSNull()]).render(out, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8, colorSpace: nil)
-        var c = NSColor(red: CGFloat(px[0]) / 255, green: CGFloat(px[1]) / 255, blue: CGFloat(px[2]) / 255, alpha: 1)
-        c = c.usingColorSpace(.deviceRGB) ?? c
-        // Keep it vivid and light enough on black.
-        let sat = min(1, c.saturationComponent * 1.3)
-        let bri = max(0.7, c.brightnessComponent)
-        return Color(NSColor(hue: c.hueComponent, saturation: sat, brightness: bri, alpha: 1))
-    }
-}
-
-@available(macOS 14.0, *)
-struct ExpandedView: View {
-    @ObservedObject var notes: NotesModel
-    @ObservedObject var media: NowPlayingModel
-    @ObservedObject var tab: ExpandedTab
-
-    private func switchCard() {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-            tab.tab = tab.tab == .player ? .notes : .player
-        }
-    }
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Group {
-                if tab.tab == .player && media.available {
-                    NowPlayingView(model: media, onSwitch: switchCard)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                } else {
-                    NotesListView(model: notes)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // The player reaches notes from its transport row; the notes
-            // card gets one quiet glyph back to the player.
-            if media.available && tab.tab == .notes {
-                Button { switchCard() } label: {
-                    Image(systemName: "music.note")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.white.opacity(0.08)))
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 6)
-                .padding(.trailing, 8)
-            }
-        }
-        .foregroundStyle(.white)
-        .preferredColorScheme(.dark)
-    }
-}
-
-/// Alcove-style player: big artwork · title/artist · bars, thin timeline,
-/// one tight transport row. No volume row — the card stays compact.
-@available(macOS 14.0, *)
-struct NowPlayingView: View {
-    @ObservedObject var model: NowPlayingModel
-    var onSwitch: () -> Void
-    @State private var scrubbing: Double? = nil
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                artwork
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                    Text(model.artist.isEmpty ? model.album : model.artist)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                Bars(playing: model.playing, color: model.accent)
-                    .frame(width: 18, height: 14)
-            }
-            timeline
-            HStack {
-                // A leading spacer the width of the trailing glyph, so the
-                // transport cluster is truly centred.
-                Color.clear.frame(width: 26, height: 26)
-                Spacer()
-                HStack(spacing: 26) {
-                    transport("backward.fill", size: 15) { mediaActionCallback?(3, 0) }
-                    transport(model.playing ? "pause.fill" : "play.fill", size: 21) { mediaActionCallback?(1, 0) }
-                    transport("forward.fill", size: 15) { mediaActionCallback?(2, 0) }
-                }
-                Spacer()
-                Button(action: onSwitch) {
-                    Image(systemName: "list.bullet")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Color.white.opacity(0.08)))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-    }
-
-    private var artwork: some View {
-        Group {
-            if let img = model.artwork {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08))
-                    Image(systemName: "music.note").font(.system(size: 22)).foregroundStyle(.white.opacity(0.4))
-                }
-            }
-        }
-        .frame(width: 60, height: 60)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var timeline: some View {
-        TimelineView(.periodic(from: .now, by: model.playing ? 0.5 : 60)) { ctx in
-            let elapsed = scrubbing ?? model.elapsedNow(at: ctx.date)
-            let total = max(model.duration, 0.001)
-            HStack(spacing: 8) {
-                Text(fmt(elapsed))
-                    .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
-                    .frame(width: 32, alignment: .trailing)
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.16))
-                        Capsule().fill(model.accent.opacity(0.9))
-                            .frame(width: max(4, geo.size.width * CGFloat(min(1, elapsed / total))))
-                    }
-                    .frame(height: 4)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { g in
-                            scrubbing = Double(max(0, min(1, g.location.x / geo.size.width))) * total
-                        }
-                        .onEnded { g in
-                            let t = Double(max(0, min(1, g.location.x / geo.size.width))) * total
-                            mediaActionCallback?(4, Int64(t * 1_000_000))
-                            // Hold the scrubbed position until the next update lands.
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { scrubbing = nil }
-                        })
-                }
-                .frame(height: 14)
-                Text("-" + fmt(max(0, total - elapsed)))
-                    .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
-                    .frame(width: 36, alignment: .leading)
-            }
-        }
-    }
-
-    private func transport(_ name: String, size: CGFloat, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: size, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 34, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func fmt(_ t: Double) -> String {
-        let s = Int(t.rounded(.down))
-        return String(format: "%d:%02d", s / 60, s % 60)
-    }
-}
-
-/// Four little bars that dance while playing (Alcove's glyph), in the
-/// artwork's colour.
-@available(macOS 14.0, *)
-struct Bars: View {
-    let playing: Bool
-    let color: Color
-    @State private var phase = false
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<4, id: \.self) { i in
-                Capsule().fill(color)
-                    .frame(width: 2.5, height: playing ? (phase ? [10, 6, 13, 8][i] : [5, 12, 7, 11][i]) : 3)
-                    .animation(playing ? .easeInOut(duration: 0.45 + Double(i) * 0.07).repeatForever(autoreverses: true) : .default, value: phase)
-            }
-        }
-        .onAppear { phase = true }
     }
 }

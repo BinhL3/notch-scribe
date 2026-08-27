@@ -20,9 +20,6 @@ int notch_overlay_available(void);
 void notch_overlay_show(void);
 void notch_overlay_hide(void);
 void notch_overlay_show_notes(void);
-void notch_overlay_set_now_playing(const char *json);
-typedef void (*notch_media_action_cb)(int32_t action, int64_t arg);
-void notch_overlay_set_media_callback(notch_media_action_cb cb);
 
 // Microphone level, 0.0 ... 1.0.
 void notch_overlay_set_level(float level);

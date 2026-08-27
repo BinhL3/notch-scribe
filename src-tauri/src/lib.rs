@@ -17,7 +17,6 @@ mod helpers;
 mod input;
 mod llm_client;
 mod managers;
-mod media;
 mod memory;
 #[cfg(target_os = "macos")]
 mod native_notch;
@@ -997,10 +996,6 @@ pub fn run(cli_args: CliArgs) {
             // Seed the account's full name into custom words once.
             #[cfg(target_os = "macos")]
             seed_owner_name(app.handle());
-
-            // Now Playing for the island's player card (macOS only; no-op
-            // when the MediaRemote adapter cannot run on this system).
-            media::start(app.handle());
 
             // Follow microphones as they come and go (docking).
             managers::audio::watch_devices(app.handle().clone());
