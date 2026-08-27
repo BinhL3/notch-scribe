@@ -10,10 +10,11 @@ Built on [Handy](https://github.com/cjpais/Handy).
 - **On-device by default.** Apple Speech (`SpeechAnalyzer`, macOS 26) transcribes with nothing to download, ~0.2 s for a sentence. Nemotron, Parakeet and Whisper are one click away.
 - **Refine on selection.** Tap the refine key to clean up selected text; tap-and-hold to speak an instruction ("make this a list", "shorter"). Bring your own model key, or run Ollama locally.
 - **Never lose a dictation.** No text field to paste into? It stays on the clipboard.
+- **Notes as a byproduct.** Start with "note down…" and it's kept, not typed: click the island for the inbox, one swipe to clear, tap to copy. Each note remembers the app and page you were on.
 
 ## Install
 
-Requires macOS 26 on Apple Silicon for the notch overlay and Apple Speech; other Macs fall back to Handy's overlay and models.
+Requires macOS 26 on Apple Silicon for Apple Speech; other models work on any Mac. The island lives in the notch on a MacBook and floats at the top of any other display.
 
 Grab the `.dmg` from [Releases](https://github.com/BinhL3/noi/releases). If macOS says the app is damaged (unsigned build): `xattr -d com.apple.quarantine /Applications/Noi.app`.
 
