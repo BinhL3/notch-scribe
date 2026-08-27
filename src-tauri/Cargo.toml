@@ -3,7 +3,7 @@
 # ("About …") and the Dock entry after the running executable in dev, where
 # there is no bundle to take the product name from.
 name = "noi"
-version = "0.9.5"
+version = "0.1.0"
 description = "Noi"
 authors = ["binhle", "cjpais"]
 edition = "2021"
