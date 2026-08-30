@@ -1,7 +1,9 @@
 # Noi — handoff (v0.1.0, 2026-08-27)
 
 A one-page brief for updating the project page / portfolio. Everything here is
-in the public repo; download link is the GitHub Release.
+in the public repo; download link is the GitHub Release. For building the
+site itself, hand an agent **`docs/SITE_BRIEF.md`** (copy blocks, colours,
+assets, FAQ) plus `docs/screenshots/` and `docs/brand/`.
 
 ## One-liner
 
