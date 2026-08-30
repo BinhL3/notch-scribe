@@ -77,6 +77,25 @@
 }
 
 /* Simple settings page: no cards, just rows and hairlines. */
+/* Simple page density: tighter rows, reset arrows only on hover, inputs
+   that fit the single column instead of Handy's wide layout. */
+.simple .divide-y > div {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.simple .row-reset {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.simple .group:hover .row-reset,
+.simple .row-reset:focus-visible {
+  opacity: 1;
+}
+.simple .min-w-\[380px\],
+.simple .min-w-\[320px\] {
+  min-width: 220px;
+}
+
 .simple .glass {
   background: transparent;
   border: 0;

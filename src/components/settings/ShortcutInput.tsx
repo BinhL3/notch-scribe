@@ -46,23 +46,34 @@ export const ShortcutInput: React.FC<ShortcutInputProps> = (props) => {
     if (r.status === "ok") await refreshSettings();
   };
 
+  const addButton = (
+    <button
+      type="button"
+      aria-label={t("settings.general.shortcut.addAnotherKey")}
+      title={t("settings.general.shortcut.addAnotherKey")}
+      className="row-reset p-1 rounded-md border border-transparent text-text/80 hover:bg-logo-primary/30 hover:border-logo-primary cursor-pointer"
+      onClick={addAlternate}
+    >
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+      </svg>
+    </button>
+  );
+  const canAdd = isBase && props.shortcutId !== "cancel";
+  const last = alternates[alternates.length - 1];
+
   return (
     <>
-      <Input {...props} />
+      <Input {...props} trailing={canAdd && !last ? addButton : undefined} />
       {alternates.map((id) => (
-        <Input key={id} {...props} shortcutId={id} />
+        <Input
+          key={id}
+          {...props}
+          shortcutId={id}
+          title={t("settings.general.shortcut.also")}
+          trailing={canAdd && id === last ? addButton : undefined}
+        />
       ))}
-      {isBase && props.shortcutId !== "cancel" && (
-        <div className="px-4 pb-2 -mt-1 flex justify-end">
-          <button
-            type="button"
-            className="px-1.5 py-0.5 rounded-md text-xs text-mid-gray hover:text-logo-primary hover:bg-logo-primary/10 transition-colors cursor-pointer"
-            onClick={addAlternate}
-          >
-            {t("settings.general.shortcut.addAnotherKey")}
-          </button>
-        </div>
-      )}
     </>
   );
 };

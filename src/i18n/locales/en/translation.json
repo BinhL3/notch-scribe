@@ -187,9 +187,10 @@
           "set": "Failed to set shortcut: {{error}}",
           "reset": "Failed to reset shortcut to original value"
         },
-        "addAnotherKey": "+ Another key",
+        "addAnotherKey": "Add another key",
         "removeKey": "Remove this key",
-        "clickToSet": "Click to set"
+        "clickToSet": "Click to set",
+        "also": "Also"
       },
       "language": {
         "title": "Language",

@@ -6,12 +6,14 @@ import { useSettings } from "../../hooks/useSettings";
 import type { OverlayPosition, OverlayStyle } from "@/bindings";
 
 interface ShowOverlayProps {
+  /// The island is always at the top; the Simple page hides the position row.
+  showPosition?: boolean;
   descriptionMode?: "inline" | "tooltip";
   grouped?: boolean;
 }
 
 export const ShowOverlay: React.FC<ShowOverlayProps> = React.memo(
-  ({ descriptionMode = "tooltip", grouped = false }) => {
+  ({ descriptionMode = "tooltip", grouped = false, showPosition = true }) => {
     const { t } = useTranslation();
     const { getSetting, updateSetting, isUpdating } = useSettings();
 
@@ -66,7 +68,7 @@ export const ShowOverlay: React.FC<ShowOverlayProps> = React.memo(
           />
         </SettingContainer>
 
-        {selectedStyle !== "none" && (
+        {showPosition && selectedStyle !== "none" && (
           <SettingContainer
             title={t("settings.advanced.overlay.position.title")}
             description={t("settings.advanced.overlay.position.description")}

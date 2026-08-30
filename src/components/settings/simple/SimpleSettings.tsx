@@ -32,8 +32,8 @@ export const SimpleSettings: React.FC<{
 
   return (
     <div className="simple max-w-xl w-full mx-auto pb-16">
-      <div className="px-4 pt-2 pb-2">
-        <NoiWordmark width={96} />
+      <div className="px-4 pt-1 pb-1">
+        <NoiWordmark width={84} />
       </div>
 
       <SimpleSection title={t("simple.general")}>
@@ -41,7 +41,7 @@ export const SimpleSettings: React.FC<{
         <ShortcutInput shortcutId="refine_selection" grouped={true} />
         <PushToTalk descriptionMode="tooltip" grouped={true} />
         <MicrophoneSelector descriptionMode="tooltip" grouped={true} />
-        <ShowOverlay descriptionMode="tooltip" grouped={true} />
+        <ShowOverlay descriptionMode="tooltip" grouped={true} showPosition={false} />
         <OverlayClock descriptionMode="tooltip" grouped={true} />
         <AutostartToggle descriptionMode="tooltip" grouped={true} />
         <AudioFeedback descriptionMode="tooltip" grouped={true} />

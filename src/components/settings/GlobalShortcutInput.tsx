@@ -17,6 +17,10 @@ interface GlobalShortcutInputProps {
   grouped?: boolean;
   shortcutId: string;
   disabled?: boolean;
+  /// Row title override (alternate keys read "Also").
+  title?: string;
+  /// Rendered after the reset arrow, e.g. the "add another key" button.
+  trailing?: React.ReactNode;
 }
 
 export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
@@ -24,6 +28,8 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
   grouped = false,
   shortcutId,
   disabled = false,
+  title,
+  trailing,
 }) => {
   const { t } = useTranslation();
   const { getSetting, updateBinding, resetBinding, isUpdating, isLoading } =
@@ -268,7 +274,7 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
 
   return (
     <SettingContainer
-      title={translatedName}
+      title={title ?? translatedName}
       description={translatedDescription}
       descriptionMode={descriptionMode}
       grouped={grouped}
@@ -297,6 +303,7 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
           onClick={() => resetBinding(shortcutId)}
           disabled={isUpdating(`binding_${shortcutId}`)}
         />
+        {trailing}
       </div>
     </SettingContainer>
   );
