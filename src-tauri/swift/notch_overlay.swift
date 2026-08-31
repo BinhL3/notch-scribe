@@ -1572,9 +1572,30 @@ private final class IslandController {
         }
     }
 
+    /// Leaving the expanded list closes it — after a short grace so a
+    /// pointer that slips off an edge doesn't slam it shut. Only once the
+    /// pointer has actually been on the list since it opened: opened from
+    /// the menu bar, the pointer starts elsewhere and the list must wait.
+    private var enteredSinceExpand = false
+    private static let leaveGrace: TimeInterval = 0.35
+
     private func setHovering(_ now: Bool) {
         guard now != hovering else { return }
         hovering = now
+        if expanded {
+            pendingCollapse?.cancel()
+            if now {
+                enteredSinceExpand = true
+            } else if enteredSinceExpand {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.expanded, !self.hovering else { return }
+                    self.collapse()
+                }
+                pendingCollapse = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.leaveGrace, execute: work)
+            }
+            return
+        }
         guard !recording, !yielding, let view else { return }
         if now {
             pendingUnpeek?.cancel()
@@ -1613,6 +1634,10 @@ private final class IslandController {
     func expand() {
         guard let panel, let view, !expanded else { return }
         expanded = true
+        // Opened by a click, the pointer is already on it; opened from the
+        // menu bar it isn't — hovering tells us which.
+        enteredSinceExpand = hovering
+        pendingCollapse?.cancel()
         pendingPeek?.cancel()
         pendingUnpeek?.cancel()
         // The panel takes the mouse only while expanded, so it never steals
@@ -1627,6 +1652,7 @@ private final class IslandController {
     func collapse() {
         guard let panel, let view, expanded else { return }
         expanded = false
+        pendingCollapse?.cancel()
         panel.ignoresMouseEvents = true
         view.layoutPill(hovering ? .peek : .closed, animated: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + Island.shrinkDuration + 0.1) { [weak self] in
